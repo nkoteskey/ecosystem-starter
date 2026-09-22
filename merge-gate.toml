@@ -1,0 +1,138 @@
+# merge-gate.toml — repository-specific values for the merge-gate scripts.
+#
+# Every key has a default (see scripts/mergegate_config.py DEFAULTS and
+# docs/CONFIG.md); this file only needs the keys you change. This copy
+# describes a small example workspace: one Rust crate tree under crates/,
+# one desktop app under apps/example-app (Rust backend in src-tauri/,
+# TypeScript frontend in src/), and one shared frontend package.
+#
+# Supported syntax is a TOML subset: [tables], bare keys, "basic" and
+# 'literal' strings, integers, floats, booleans, arrays of those, comments.
+# Use 'literal' strings for regular expressions.
+
+schema = 1
+
+[repo]
+remote = "origin"
+main_branch = "main"
+train_prefix = "train/local-"
+status_context = "full gate (scripts/full-gate.sh)"
+baseline_file = "ci/baseline.json"
+results_dir = "ci-results"
+hooks_path = "scripts/git-hooks"
+
+[worktree]
+# Empty = $HOME/dev/<repo basename>.wt. $MERGE_GATE_WT_ROOT overrides both.
+root = ""
+branch_prefix = "wt/"
+# Gitignored directories a fresh worktree needs, copied from the primary
+# checkout by `wt.sh new --bootstrap` / `wt.sh bootstrap`.
+bootstrap_copy = ["apps/*/src-tauri/bundled"]
+bootstrap_npm_dirs = ["apps/example-app", "packages/shared-ui"]
+
+[claims]
+dir = "claims"
+ref_prefix = "refs/claims/"
+# Rule (a): a crate reachable via path deps from >= min_consumers of these
+# crates is a shared service.
+app_crates = ["example-app"]
+min_consumers = 2
+default_ttl_hours = 8
+exempt_actors = ["dependabot[bot]"]
+
+[affected]
+crates_dir = "crates"
+apps_dir = "apps"
+app_rust_subdir = "src-tauri"
+frontend_apps = ["example-app"]
+frontend_src_subdir = "src"
+# mobile_dir = "apps/mobile"
+integration_paths = []
+
+[affected.packages.shared-ui]
+path = "packages/shared-ui"
+affects_all_frontends = true
+
+[adr]
+dir = "adr"
+ignored_basenames = ["OPEN-QUESTIONS.md", "README.md", "TEMPLATE.md", "0000-template.md"]
+nonsubstantive_marker = "[adr-nonsubstantive]"
+
+[gates]
+rust = true
+cargo_fmt = true
+cargo_clippy_args = ["--all-targets", "--all-features", "--", "-D", "warnings"]
+cargo_test_args = ["--all", "--no-fail-fast"]
+scripts_selftest = true
+standards = true
+adr = true
+invariants = true
+claims = true
+
+# Blocking steps run before everything else, from the repo root.
+# [gates.pre.stub-resources]
+# command = "mkdir -p apps/example-app/src-tauri/bundled && touch apps/example-app/src-tauri/bundled/model.bin"
+
+[gates.frontend.example-app]
+dir = "apps/example-app"
+install = "npm ci"
+typecheck = "npx --no-install tsc --noEmit"
+build = "npm run build"
+test = 'npx --no-install vitest run --reporter=json --outputFile="$MERGE_GATE_OUT"'
+test_blocking = false
+
+[gates.frontend.shared-ui]
+dir = "packages/shared-ui"
+install = "npm ci"
+typecheck = "npx --no-install tsc --noEmit"
+build = ""
+test = ""
+
+# Extra checks after the frontends. `cargo_log = true` tees the command's
+# output to <results>/cargo-<name>.log so its tests join the baseline.
+# [gates.extra.bindings-drift]
+# command = "git diff --exit-code -- 'apps/*/src/bindings.gen.ts'"
+# [gates.extra.integration-audit]
+# command = "cargo test -p integration-audit"
+# blocking = false
+# cargo_log = true
+
+[gates.fuzz]
+dir = ""
+nightly = ""
+targets = []
+
+[invariants]
+roots = ["crates", "apps"]
+allowlist = "scripts/invariants-allowlist.txt"
+
+[invariants.checks.no_todo_panics]
+description = "No todo!() panics outside tests"
+pattern = 'todo!\('
+paths = ["crates/**/*.rs", "apps/**/src-tauri/**/*.rs"]
+excludes = ["**/tests/**", "**/*_test.rs", "**/tests.rs"]
+
+[invariants.checks.no_server_bind]
+description = "No HTTP/RPC server frameworks bound in application code"
+pattern = '(TcpListener::bind|axum::Server|warp::serve|actix_web::HttpServer|tonic::transport::Server)'
+paths = ["crates/**/*.rs", "apps/**/src-tauri/**/*.rs"]
+excludes = ["**/tests/**", "**/*_test.rs", "**/tests.rs"]
+
+[standards]
+ts_root = "apps"
+ts_globs = ["**/src/**/*.ts", "**/src/**/*.tsx"]
+rust_roots = ["apps", "crates"]
+rust_globs = ["**/src-tauri/src/**/*.rs", "crates/**/src/**/*.rs"]
+allowlist = "scripts/standards-allowlist.txt"
+
+[standards.checks.money-tofixed]
+tier = "fail"
+scope = "ts"
+pattern = '(\$\$\{|>\s*\$\{|["\x27]\s*\$\{|^\s*\$\{)[^}]*\.toFixed\(2\)'
+message = "currency rendered with raw toFixed(2) — use the adaptive formatter, or allowlist with a justification"
+
+[standards.checks.swallowed-catch]
+tier = "warn"
+scope = "ts"
+pattern = 'catch\s*(\([^)]*\))?\s*\{\s*console\.error\([^;{}]*\);?\s*\}'
+message = "catch surfaces only console.error — no user-visible error; confirm this is not an action flow"

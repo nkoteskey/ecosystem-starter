@@ -1,0 +1,10 @@
+# standards-allowlist.txt — justified exceptions to scripts/standards-check.sh.
+#
+# Format:  <check_id>  <path_substring>  # justification (mandatory)
+#   - check_id       a [standards.checks.<id>] table name in merge-gate.toml
+#   - path_substring a fail-tier match is suppressed when this substring is
+#                    in its file path
+#
+# Every entry is a standard in miniature: a pattern the docs forbid,
+# suppressed here only because the specific site is a documented,
+# legitimate use. Removing the reason for an entry means removing the entry.

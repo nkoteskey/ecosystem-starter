@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+extend-exclude = ["ci-results"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "UP006", "UP007", "UP035", "UP045",  # typing.Dict/List/Optional stay: python 3.8 hosts
+  "RUF001", "RUF002", "RUF003",        # em dashes in messages are intentional
+  "SIM108", "SIM115",
+  "B904",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/tests/*" = ["RUF059"]  # (ok, failures, checked) unpacks where one part is irrelevant to that test
+
+[tool.ruff.lint.isort]
+known-first-party = ["mergegate_config"]
+
+[tool.pytest.ini_options]
+testpaths = ["scripts/tests"]
+python_files = "test_*.py"

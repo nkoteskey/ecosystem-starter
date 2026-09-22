@@ -1,0 +1,2 @@
+Vendored from jams-merge-gate; see that repository's SOURCE for the upstream commit.
+Upgrade with: <path-to-jams-merge-gate>/bootstrap.sh <this-repo>

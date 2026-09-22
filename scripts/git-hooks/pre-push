@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# scripts/git-hooks/pre-push — client-side stand-in for branch protection
+# (docs/DESIGN.md §2 / §3). It is bypassable (`--no-verify`); a server-side
+# ruleset on the main branch is the real backstop where the hosting plan
+# allows one.
+#
+# Installed repo-wide via `git config core.hooksPath <repo.hooks_path>`
+# (scripts/wt.sh new/bootstrap does this on the COMMON .git/config, so it
+# applies to every worktree of this repo, current and future — intended).
+#
+# Refuses:
+#   - any push updating refs/heads/<main>, unless MERGE_GATE_TRAIN=1
+#   - any push updating refs/heads/<train prefix>*, unless MERGE_GATE_TRAIN=1
+# MERGE_GATE_TRAIN=1 is set only by scripts/land.sh immediately before its
+# own pushes. Never set it yourself to bypass this hook.
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PY="$HOOK_DIR/../mergegate_config.py"
+
+MAIN_BRANCH="main"
+TRAIN_PREFIX="train/local-"
+if [ -f "$CONFIG_PY" ]; then
+  MAIN_BRANCH="$(python3 "$CONFIG_PY" get repo.main_branch --default main 2>/dev/null || echo main)"
+  TRAIN_PREFIX="$(python3 "$CONFIG_PY" get repo.train_prefix --default train/local- 2>/dev/null || echo train/local-)"
+fi
+
+blocked=0
+
+# shellcheck disable=SC2034  # local_ref/local_sha/remote_sha are positional
+# fields of git's pre-push stdin protocol; only remote_ref is inspected.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  case "$remote_ref" in
+    "refs/heads/$MAIN_BRANCH")
+      if [ "${MERGE_GATE_TRAIN:-}" != "1" ]; then
+        blocked=1
+        cat >&2 <<EOF
+
+REFUSED: direct push to refs/heads/$MAIN_BRANCH.
+
+Nothing reaches $MAIN_BRANCH except through the gate: the only landing path
+is scripts/land.sh (assembles $MAIN_BRANCH + your branches into a train,
+runs scripts/full-gate.sh, refreshes the baseline, pushes with the
+Verified-Train: trailer, releases claims).
+
+scripts/land.sh sets MERGE_GATE_TRAIN=1 immediately before this exact push —
+if you are not land.sh, do not set that yourself to bypass this gate.
+EOF
+      fi
+      ;;
+    "refs/heads/$TRAIN_PREFIX"*)
+      if [ "${MERGE_GATE_TRAIN:-}" != "1" ]; then
+        blocked=1
+        echo "REFUSED: push to '$remote_ref' — train branches are only pushed by scripts/land.sh (MERGE_GATE_TRAIN=1)." >&2
+      fi
+      ;;
+  esac
+done
+
+if [ "$blocked" -eq 1 ]; then
+  exit 1
+fi
+
+exit 0

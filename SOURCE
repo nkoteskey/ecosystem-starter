@@ -1,0 +1,5 @@
+Vendored scripts extracted from the upstream monorepo at commit 6803cbf07a929e0453d343700d26d1e912193198
+(origin/main, 2026-09-22), via the jams-merge-gate staging repository.
+Templates (NORTH_STAR_TEMPLATE.md, CLAUDE_TEMPLATE.md, adr/, docs/) are original
+to this repository and derive from no upstream file.
+Re-extraction: see oss-sync.sh in the staging parent directory.

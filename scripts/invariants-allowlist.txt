@@ -1,0 +1,8 @@
+# invariants-allowlist.txt — ratchet for scripts/invariants-check.sh.
+#
+# Format: <invariant-id> <repo-relative path>   # reason (mandatory)
+#
+# A listed (id, path) pair downgrades hits in that file to informational.
+# Use it to introduce an invariant on a tree that does not yet satisfy it:
+# snapshot the pre-existing hits here with a reason each, then only shrink
+# the list. A new file hitting an invariant is never added here silently.
