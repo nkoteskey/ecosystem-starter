@@ -31,6 +31,7 @@ SCRIPT_DIR="$ROOT/scripts"
 CONFIG_PY="$SCRIPT_DIR/mergegate_config.py"
 
 cfg() { python3 "$CONFIG_PY" get "$@"; }
+# cfg_list <key> — fills the global CFG_LIST array (bash 3.2 has no mapfile).
 cfg_list() {
   CFG_LIST=()
   local line
@@ -38,7 +39,17 @@ cfg_list() {
     if [ -n "$line" ]; then
       CFG_LIST+=("$line")
     fi
-  done < <("$@")
+  done < <(cfg "$@")
+}
+# cfg_keys <table> — fills CFG_LIST with the sub-table names of <table>.
+cfg_keys() {
+  CFG_LIST=()
+  local line
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then
+      CFG_LIST+=("$line")
+    fi
+  done < <(python3 "$CONFIG_PY" keys "$1")
 }
 
 if ! python3 "$CONFIG_PY" validate >/dev/null; then
@@ -46,7 +57,7 @@ if ! python3 "$CONFIG_PY" validate >/dev/null; then
 fi
 
 ALLOWLIST="$ROOT/$(cfg invariants.allowlist)"
-cfg_list cfg invariants.roots
+cfg_list invariants.roots
 ROOTS=("${CFG_LIST[@]:+${CFG_LIST[@]}}")
 
 violation_count=0
@@ -69,12 +80,12 @@ scan_invariant() {
   for r in "${ROOTS[@]}"; do
     args+=(--root "$r")
   done
-  cfg_list cfg "invariants.checks.$id.paths"
+  cfg_list "invariants.checks.$id.paths"
   local p
   for p in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do
     args+=(--glob "$p")
   done
-  cfg_list cfg "invariants.checks.$id.excludes"
+  cfg_list "invariants.checks.$id.excludes"
   local e
   for e in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do
     args+=(--exclude "$e")
@@ -110,7 +121,7 @@ scan_invariant() {
 
 echo "invariants-check: scanning ${ROOTS[*]} …"
 
-cfg_list python3 "$CONFIG_PY" keys invariants.checks
+cfg_keys invariants.checks
 for id in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do
   scan_invariant "$id"
 done

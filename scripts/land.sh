@@ -99,7 +99,7 @@ PYEOF
 # safe to call in --dry-run.
 claims_held_by() {
   local branch="$1"
-  python3 "$SCRIPT_DIR/claims.py" list --json 2>/dev/null | python3 -c '
+  python3 "$SCRIPT_DIR/claims.py" list --json | python3 -c '
 import json, sys
 branch = sys.argv[1]
 try:
@@ -335,8 +335,8 @@ done
 
 if [ "$BOOTSTRAP" -eq 1 ] && ! bootstrap_allowed; then
   echo "land.sh: --bootstrap refused — $BASELINE_FILE already has recorded suites. --bootstrap is only for creating the FIRST baseline; run a normal landing instead." >&2
-  git checkout "$MAIN"
-  git branch -D "$TRAIN_BRANCH" 2>/dev/null || true
+  run_mut git checkout "$MAIN"
+  run_mut git branch -D "$TRAIN_BRANCH"
   exit 1
 fi
 
@@ -437,10 +437,11 @@ Verified-Train: $TRAIN_BRANCH $TRAIN_TIP_BEFORE_BASELINE"
       "$STATUS_CONTEXT" "local train $TRAIN_BRANCH: full gate green"
   else
     HEAD_SHA="$(git rev-parse HEAD)"
-    if ! MERGE_GATE_TRAIN=1 git push -q "$REMOTE" "$TRAIN_BRANCH:refs/heads/$TRAIN_BRANCH"; then
+    if MERGE_GATE_TRAIN=1 git push -q "$REMOTE" "$TRAIN_BRANCH:refs/heads/$TRAIN_BRANCH"; then
+      REMOTE_TRAIN_PUSHED=1
+    else
       warn_red "could not push the train ref '$TRAIN_BRANCH' to $REMOTE — without it the required status cannot be attached and a protected main will reject the landing."
     fi
-    REMOTE_TRAIN_PUSHED=1
     if command -v gh >/dev/null 2>&1; then
       STATUS_ERR="$(mktemp)"
       posted=0

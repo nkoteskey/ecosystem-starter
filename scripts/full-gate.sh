@@ -145,7 +145,7 @@ else
   RESULTS_DIR_ABS="$(cd "$RESULTS_DIR" && pwd)"
 fi
 
-# A colour-enabled cargo wraps its output in ANSI escapes; the baseline
+# A color-enabled cargo wraps its output in ANSI escapes; the baseline
 # parser strips them, but avoid generating them for every cargo invocation
 # this script makes.
 export CARGO_TERM_COLOR=never
@@ -394,8 +394,11 @@ gate_baseline_retry() {
     return 0
   fi
   local retry_file="$RESULTS_DIR_ABS/.retry-list.tsv"
-  python3 "$SCRIPT_DIR/test-baseline.py" retry-list --results "$RESULTS_DIR_ABS" \
-    --baseline "$BASELINE_FILE" > "$retry_file"
+  if ! python3 "$SCRIPT_DIR/test-baseline.py" retry-list --results "$RESULTS_DIR_ABS" \
+    --baseline "$BASELINE_FILE" > "$retry_file"; then
+    echo "baseline-retry: retry-list failed (malformed baseline or results) — see above" >&2
+    return 1
+  fi
   if [ -s "$retry_file" ]; then
     echo "retrying flaky_retry-listed failing tests once (workspace-wide, exact name match):"
     cat "$retry_file"
@@ -408,7 +411,9 @@ gate_baseline_retry() {
       echo "  retry: cargo test ${test_args[*]} -- --exact '$testname'"
       cargo test "${test_args[@]}" -- --exact "$testname" 2>&1 | tee -a "$RESULTS_DIR_ABS/cargo-test.log" || true
     done
-    python3 "$SCRIPT_DIR/test-baseline.py" collect --results "$RESULTS_DIR_ABS"
+    # Re-collect so compare sees the re-run's outcome; a collect failure
+    # here is a gate failure, not a silent "no retries happened".
+    python3 "$SCRIPT_DIR/test-baseline.py" collect --results "$RESULTS_DIR_ABS" || return 1
   fi
   return 0
 }

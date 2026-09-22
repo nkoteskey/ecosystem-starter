@@ -55,6 +55,6 @@ drivers — and why each other option lost.
 
 ## Validation
 
-How we know the decision is honoured: the tests, grep invariants, gates or
+How we know the decision is honored: the tests, grep invariants, gates or
 checklist rows that enforce it. For a retrospective record, the shipped
 implementation that ratifies it.

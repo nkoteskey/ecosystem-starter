@@ -13,8 +13,8 @@ it pushes to from this file, and an override would let a stray variable
 point a landing at a different remote.
 
 Stdlib only, and no `tomllib` (it needs Python 3.11; the macOS system
-`python3` and the oldest supported CI images are not guaranteed to have
-it). The parser below accepts the TOML subset the config uses:
+`python3` is 3.9 and CI runs the suite on 3.9). The parser below accepts
+the TOML subset the config uses:
 
 - `[table]` and `[table.sub.table]` headers (bare keys only);
 - `key = value` with a bare key;
@@ -445,6 +445,33 @@ def load_config(root: Optional[Path] = None) -> Dict[str, Any]:
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _REL_PATH_RE = re.compile(r"^(?!/)(?!.*(^|/)\.\.(/|$)).*$")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_RESERVED_REF_NAMESPACES = ("refs/heads/", "refs/tags/", "refs/remotes/", "refs/notes/")
+
+
+def _git_check_ref_format(*args: str) -> bool:
+    res = subprocess.run(["git", "check-ref-format", *args], capture_output=True, text=True)
+    return res.returncode == 0
+
+
+def _valid_branch(name: str) -> bool:
+    return bool(name) and not name.startswith("-") and _git_check_ref_format("--branch", name)
+
+
+def _valid_ref(name: str) -> bool:
+    return bool(name) and not name.startswith("-") and _git_check_ref_format(name)
+
+
+def _valid_worktree_root(value: str) -> bool:
+    if value == "":
+        return True
+    if not (value.startswith("~/") or value.startswith("/")):
+        return False
+    return not any(part == ".." for part in value.split("/"))
+
+
+def _rel_nonempty(value: str) -> bool:
+    return bool(value) and bool(_REL_PATH_RE.match(value))
 
 
 def _expect(problems: List[str], cond: bool, msg: str) -> None:
@@ -469,6 +496,22 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
     _expect(p, "/" not in str(repo["main_branch"]), "repo.main_branch must not contain '/'")
     _expect(
         p,
+        _valid_branch(str(repo["main_branch"])),
+        "repo.main_branch is not a valid branch name (git check-ref-format)",
+    )
+    _expect(
+        p,
+        _valid_ref(f"refs/heads/{repo['train_prefix']}x"),
+        "repo.train_prefix is not a valid branch-name prefix (git check-ref-format)",
+    )
+    _expect(
+        p,
+        0 < len(str(repo["status_context"])) <= 255
+        and not _CONTROL_RE.search(str(repo["status_context"])),
+        "repo.status_context must be one non-empty line (at most 255 characters)",
+    )
+    _expect(
+        p,
         str(repo["train_prefix"]).endswith("-") or str(repo["train_prefix"]).endswith("/"),
         "repo.train_prefix should end with '-' or '/'",
     )
@@ -478,6 +521,16 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
 
     wt = cfg["worktree"]
     _expect(p, str(wt["branch_prefix"]).endswith("/"), "worktree.branch_prefix must end with '/'")
+    _expect(
+        p,
+        _valid_ref(f"refs/heads/{wt['branch_prefix']}x"),
+        "worktree.branch_prefix is not a valid branch-name prefix (git check-ref-format)",
+    )
+    _expect(
+        p,
+        _valid_worktree_root(str(wt["root"])),
+        "worktree.root must be empty, absolute, or start with '~/', and contain no '..'",
+    )
     _expect(p, _is_str_list(wt["bootstrap_copy"]), "worktree.bootstrap_copy must be a string array")
     _expect(
         p,
@@ -491,6 +544,17 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
         str(cl["ref_prefix"]).startswith("refs/") and str(cl["ref_prefix"]).endswith("/"),
         "claims.ref_prefix must look like 'refs/<name>/'",
     )
+    _expect(
+        p,
+        not any(str(cl["ref_prefix"]).startswith(r) for r in _RESERVED_REF_NAMESPACES),
+        "claims.ref_prefix must not be under refs/heads, refs/tags, refs/remotes or refs/notes",
+    )
+    _expect(
+        p,
+        _valid_ref(f"{cl['ref_prefix']}x"),
+        "claims.ref_prefix is not a valid ref namespace (git check-ref-format)",
+    )
+    _expect(p, _rel_nonempty(str(cl["dir"])), "claims.dir must be a non-empty relative path")
     _expect(p, _is_str_list(cl["app_crates"]), "claims.app_crates must be a string array")
     _expect(
         p,
@@ -561,6 +625,11 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
         _is_str_list(inv["roots"]) and len(inv["roots"]) > 0,
         "invariants.roots must be non-empty",
     )
+    _expect(
+        p,
+        _rel_nonempty(str(inv["allowlist"])),
+        "invariants.allowlist must be a non-empty relative path",
+    )
     for name, tbl in inv["checks"].items():
         _expect(p, bool(_SAFE_NAME_RE.match(name)), f"invariants.checks.{name}: bad name")
         _expect(p, bool(tbl["pattern"]), f"invariants.checks.{name}.pattern must be set")
@@ -575,6 +644,11 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
             p.append(f"invariants.checks.{name}.pattern does not compile: {e}")
 
     st = cfg["standards"]
+    _expect(
+        p,
+        _rel_nonempty(str(st["allowlist"])),
+        "standards.allowlist must be a non-empty relative path",
+    )
     for name, tbl in st["checks"].items():
         _expect(p, bool(_SAFE_NAME_RE.match(name)), f"standards.checks.{name}: bad name")
         _expect(

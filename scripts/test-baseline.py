@@ -25,11 +25,16 @@ Stdlib only. No network calls. `record`/`compare`/`retry-list` shell out to
 `git` for the current commit / commit-message trailers; `collect` alone
 never touches git.
 
-`flaky_retry` entries are `"<suite-id>\\t<test-name>"` — keyed by the raw
-suite id, not a crate name guessed back out of it, since a suite id like
-`cargo:some_integration_test` is a test-binary stem, not necessarily a
-crate name. `retry-list` emits the same shape; `scripts/full-gate.sh`
-re-runs each with a workspace-wide `cargo test ... -- --exact <test>`.
+`flaky_retry` entries are objects `{"suite": <suite-id>, "test": <name>,
+"reason": <why it is allowed one retry>, "expires": "YYYY-MM-DD"}`. All
+four fields are required; a malformed entry fails the gate, an expired one
+is ignored with a warning (the test is then treated like any other). The
+suite id is the raw one (`cargo:some_integration_test` is a test-binary
+stem, not necessarily a crate name). A listed test that FAILS in the
+results is still an R1/NEW-FAIL regression: the only thing the listing
+buys is one re-run by `scripts/full-gate.sh` (`retry-list` names it; the
+gate re-runs it with `cargo test ... -- --exact <test>` and re-collects),
+and only a re-run that PASSED clears it.
 """
 
 from __future__ import annotations
@@ -40,9 +45,9 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mergegate_config
@@ -98,6 +103,63 @@ def parse_cargo_log(text: str) -> Dict[str, Dict[str, str]]:
                 suites[current][name] = "ignored"
             # any other status token (e.g. a bench line) is skipped
     return suites
+
+
+def _load_json(path: Path, what: str) -> Any:
+    """Read and parse a JSON file; a failure is a one-line RuntimeError
+    naming the file, which `main` prints without a traceback."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise RuntimeError(f"{what} {path}: cannot read: {e.strerror}") from e
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"{what} {path}: not valid JSON (line {e.lineno}, column {e.colno}: {e.msg})"
+        ) from e
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_FLAKY_FIELDS = ("suite", "test", "reason", "expires")
+
+
+def load_flaky_retry(
+    baseline: dict, baseline_path: Path, today: Optional[date] = None
+) -> Dict[str, dict]:
+    """Validated `flaky_retry` entries keyed "<suite>\\t<test>". Every entry
+    must be an object with non-empty `suite`, `test`, `reason` and an
+    `expires` date (YYYY-MM-DD); anything else is a RuntimeError, so a
+    malformed list fails the gate instead of silently protecting nothing.
+    An expired entry is dropped with a warning."""
+    today = today or datetime.now(timezone.utc).date()
+    raw = baseline.get("flaky_retry", []) or []
+    if not isinstance(raw, list):
+        raise RuntimeError(f"baseline {baseline_path}: flaky_retry must be a list")
+    out: Dict[str, dict] = {}
+    for i, entry in enumerate(raw):
+        where = f"baseline {baseline_path}: flaky_retry[{i}]"
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"{where}: must be an object with {', '.join(_FLAKY_FIELDS)}")
+        missing = [f for f in _FLAKY_FIELDS if not isinstance(entry.get(f), str) or not entry[f]]
+        if missing:
+            raise RuntimeError(f"{where}: missing or empty field(s): {', '.join(missing)}")
+        if not _DATE_RE.match(entry["expires"]):
+            raise RuntimeError(f"{where}: expires must be YYYY-MM-DD, got {entry['expires']!r}")
+        try:
+            expires = date.fromisoformat(entry["expires"])
+        except ValueError as e:
+            raise RuntimeError(f"{where}: expires is not a real date: {e}") from e
+        key = f"{entry['suite']}\t{entry['test']}"
+        if expires < today:
+            print(
+                f"test-baseline: warning: flaky_retry entry for {key!r} expired on "
+                f"{entry['expires']} and is ignored",
+                file=sys.stderr,
+            )
+            continue
+        out[key] = entry
+    return out
 
 
 def _rel_path(name: str, base_dir: Path) -> str:
@@ -166,7 +228,7 @@ def collect_dir(results_dir: Path, base_dir: Optional[Path] = None) -> dict:
         name = f.name[len("vitest-") : -len(".json")]
         if not name:
             continue
-        data = json.loads(f.read_text())
+        data = _load_json(f, "results file")
         suites.setdefault(f"vitest:{name}", {}).update(parse_vitest_json(data, base_dir))
 
     standards_f = results_dir / "standards.status"
@@ -263,13 +325,10 @@ def cmd_record(args: argparse.Namespace) -> int:
     (results_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
     out_path = Path(args.out)
-    existing_flaky: List[str] = []
+    existing_flaky: List[dict] = []
     if out_path.exists():
-        try:
-            old = json.loads(out_path.read_text())
-            existing_flaky = old.get("flaky_retry", [])
-        except (json.JSONDecodeError, OSError):
-            existing_flaky = []
+        old = _load_json(out_path, "baseline")
+        existing_flaky = list(load_flaky_retry(old, out_path).values())
 
     baseline = {
         "schema": 1,
@@ -295,12 +354,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     baseline_path = Path(args.baseline)
     if baseline_path.exists():
-        baseline = json.loads(baseline_path.read_text())
+        baseline = _load_json(baseline_path, "baseline")
     else:
         baseline = {"suites": {}, "flaky_retry": []}
 
     baseline_suites: dict = baseline.get("suites", {}) or {}
-    flaky_retry = set(baseline.get("flaky_retry", []) or [])
+    flaky_retry = load_flaky_retry(baseline, baseline_path)
     bootstrap = bool(getattr(args, "bootstrap", False))
 
     if bootstrap and baseline_suites:
@@ -349,8 +408,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
         return any(s == suite and fnmatch.fnmatch(name, glob) for (s, glob, _r) in trailers)
 
     regressions: List[dict] = []
-    retries: List[dict] = []
     informational: List[dict] = []
+
+    def flaky_note(suite: str, name: str) -> str:
+        if f"{suite}\t{name}" in flaky_retry:
+            return " (flaky_retry-listed, but still failing — no passing retry observed)"
+        return ""
 
     for suite_id, bsuite in baseline_suites.items():
         if suite_id not in current_suites:
@@ -374,23 +437,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
             if name in cur_passed:
                 continue
             if name in cur_failed:
-                if f"{suite_id}\t{name}" in flaky_retry:
-                    retries.append(
-                        {
-                            "suite": suite_id,
-                            "test": name,
-                            "note": "failed; flaky_retry-listed, needs retry",
-                        }
-                    )
-                else:
-                    regressions.append(
-                        {
-                            "rule": "R1",
-                            "suite": suite_id,
-                            "test": name,
-                            "note": "passed at baseline, now FAILED",
-                        }
-                    )
+                regressions.append(
+                    {
+                        "rule": "R1",
+                        "suite": suite_id,
+                        "test": name,
+                        "note": "passed at baseline, now FAILED" + flaky_note(suite_id, name),
+                    }
+                )
                 continue
             if name in cur_ignored:
                 if not dropped(suite_id, name):
@@ -413,13 +467,15 @@ def cmd_compare(args: argparse.Namespace) -> int:
                     }
                 )
 
-    # Failures not already handled above as R1. Three cases:
+    # Failures not already handled above as R1. Two cases:
     #   - known-failing/ignored at baseline, still failing now: informational
     #     only, never blocks ("known-failing tests at baseline do not block
     #     until they pass once").
     #   - no baseline entry at all (brand new test, or a suite with no
-    #     baseline counterpart): a plain failure, tagged NEW-FAIL, blocks —
-    #     unless it is flaky_retry-listed, in which case it is a retry.
+    #     baseline counterpart): a plain failure, tagged NEW-FAIL, blocks.
+    # A flaky_retry listing changes neither: the retry gate re-runs the test
+    # BEFORE compare and re-collects, so a listed test that passed its
+    # re-run is simply "passed" here, and one that did not is a regression.
     for suite_id, cur in current_suites.items():
         bsuite = baseline_suites.get(suite_id, {})
         baseline_passed = set(bsuite.get("passed", []))
@@ -436,23 +492,15 @@ def cmd_compare(args: argparse.Namespace) -> int:
                     }
                 )
                 continue
-            if f"{suite_id}\t{name}" in flaky_retry:
-                retries.append(
-                    {
-                        "suite": suite_id,
-                        "test": name,
-                        "note": "new failing test, flaky_retry-listed, needs retry",
-                    }
-                )
-            else:
-                regressions.append(
-                    {
-                        "rule": "NEW-FAIL",
-                        "suite": suite_id,
-                        "test": name,
-                        "note": "failing test with no baseline-passed entry",
-                    }
-                )
+            regressions.append(
+                {
+                    "rule": "NEW-FAIL",
+                    "suite": suite_id,
+                    "test": name,
+                    "note": "failing test with no baseline-passed entry"
+                    + flaky_note(suite_id, name),
+                }
+            )
 
     if informational:
         n_info = len(informational)
@@ -465,15 +513,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
         print(f"{'rule':<12} {'suite':<28} test")
         for r in regressions:
             print(f"{r['rule']:<12} {r['suite']:<28} {r['test']}  -- {r['note']}")
-        if retries:
-            n_retry = len(retries)
-            print(
-                f"\n(also {n_retry} test(s) reported as needing retry — not counted as regressions)"
-            )
         return 1
 
     print(
-        f"compare: OK (0 regressions, {len(retries)} needing retry, "
+        f"compare: OK (0 regressions, "
         f"{len(informational)} known-failing informational, "
         f"{len(baseline_suites)} baseline suite(s) checked)"
     )
@@ -486,8 +529,8 @@ def cmd_retry_list(args: argparse.Namespace) -> int:
     current_suites = summary["suites"]
 
     baseline_path = Path(args.baseline)
-    baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else {}
-    flaky_retry = set(baseline.get("flaky_retry", []) or [])
+    baseline = _load_json(baseline_path, "baseline") if baseline_path.exists() else {}
+    flaky_retry = load_flaky_retry(baseline, baseline_path)
     prefix = getattr(args, "suite_prefix", None) or _retry_suite_prefix()
 
     # Emit the raw "<suite>\t<test>" key. The caller (scripts/full-gate.sh)

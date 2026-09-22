@@ -20,14 +20,14 @@ with the north star.
 |---|---|---|---|
 | **North star** | `docs/NORTH_STAR.md` | The charter: thesis, participants, non-negotiables, backbone, economics, guardrails, legal posture. | Long-lived; revised in place with a changelog. |
 | **Operational reference** | `CLAUDE.md` | This file: conventions, hard rules, the review loop, pointers. | Long-lived; updated as conventions evolve. |
-| **Compendium** | `docs/COMPENDIUM.md` | Living current-state record: what each component *is* and how components feed each other. | Long-lived; updated when a surface ships or retires. |
-| **Spec** | `docs/spec/<TOPIC>_SPEC.md` | The decided design for one subsystem. Derives from the north star and cites it. | Until the subsystem is retired. |
-| **Plan** | `docs/<area>/<TOPIC>_PLAN.md` | Work in progress on one area. Derives from the north star; replaceable. | Until the work ships. |
+| **Compendium** | `docs/COMPENDIUM.md` (create as needed) | Living current-state record: what each component *is* and how components feed each other. | Long-lived; updated when a surface ships or retires. |
+| **Spec** | `docs/spec/<TOPIC>_SPEC.md` (create as needed) | The decided design for one subsystem. Derives from the north star and cites it. | Until the subsystem is retired. |
+| **Plan** | `docs/<area>/<TOPIC>_PLAN.md` (create as needed) | Work in progress on one area. Derives from the north star; replaceable. | Until the work ships. |
 | **Decision record** | `adr/NNNN-<title>.md` | One architecturally significant decision, its alternatives, and its cost. Immutable once accepted. | Forever. |
 | **Open questions** | `adr/OPEN-QUESTIONS.md` | What the sources leave undecided, each traced to its source. | Entries promoted to records as they resolve. |
-| **Standard** | `docs/standards/<AREA>_STANDARDS.md` | Rules for how code in one area is written, each rule citing the incident that produced it. | Long-lived. |
+| **Standard** | `docs/standards/<AREA>_STANDARDS.md` (create as needed; see `docs/standards/README.md`) | Rules for how code in one area is written, each rule citing the incident that produced it. | Long-lived. |
 | **Live status** | `STATUS.md` | What has been done, what is next, what is in progress. | Continuously updated. |
-| **Audit** | `docs/audits/<YYYY-MM-DD>-<topic>.md` | Dated snapshot of a read-only review. Input for plans; never canonical. | Frozen at write time. |
+| **Audit** | `docs/audits/<YYYY-MM-DD>-<topic>.md` (create as needed) | Dated snapshot of a read-only review. Input for plans; never canonical. | Frozen at write time. |
 
 Rules:
 
@@ -59,6 +59,16 @@ enforces it.
 
 Examples of the shape (replace with your own):
 
+- **Decide whether this repository is public before writing money flows
+  or legal posture.** The north star's §5 (economic model) and §7 (legal
+  posture) name fee numbers, partners and unverified legal positions. In
+  a public repository those sentences are quotable by anyone; in a
+  private one they are the working truth. *Incident (YYYY-MM-DD):* a
+  draft fee schedule and an "unverified with a lawyer" note were pushed to
+  a repository that had been made public the week before. *Check:* none
+  mechanical; the north star's §5 and §7 carry the warning, and the
+  reviewer's checklist asks it on every change to either section.
+
 - **Every external network call sits behind a trait with a stub
   implementation.** *Incident (YYYY-MM-DD):* a test suite that reached a
   real vendor endpoint passed on one developer's machine and failed on
@@ -70,7 +80,7 @@ Examples of the shape (replace with your own):
   none mechanical; reviewer's checklist item.
 - **Tests never touch the real data directory.** *Incident (YYYY-MM-DD):*
   a test that wrote to the default data path deleted a developer's real
-  library. *Check:* every test uses the isolated-directory fixture; a grep
+  working data. *Check:* every test uses the isolated-directory fixture; a grep
   invariant fails on the default-path constant inside `tests/`.
 - **Nothing reaches `main` except through the gate.** *Incident
   (YYYY-MM-DD):* two sessions pushed conflicting edits to the same shared
@@ -96,7 +106,7 @@ Examples of the shape (replace with your own):
 
 Every non-trivial change goes through four stages, and the person or agent
 in each stage is not the one in the previous stage. Where one person does
-all four, the stages still happen in order, with a written artefact at
+all four, the stages still happen in order, with a written artifact at
 each hand-off.
 
 | Stage | Role | Produces | Reads |
@@ -127,9 +137,9 @@ Rules for the loop:
   surfaced to the user.
 - **Dependencies:** pinned; a new dependency is a decision, reviewed as
   one; `cargo deny` / the equivalent runs in CI.
-- **Commit messages:** imperative subject; a body that says why; trailers
-  the gate understands (`Baseline-Drop:`, `[adr-nonsubstantive]`) only
-  when their conditions are met.
+- **Commit messages:** imperative subject; a body that says why; the
+  `Baseline-Drop:` trailer and the `[adr-nonsubstantive]` marker only when
+  their conditions are met.
 
 ## Pointers
 

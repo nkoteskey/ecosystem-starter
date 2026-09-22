@@ -14,10 +14,12 @@
 #   --name    replaces the <REPO_NAME> placeholder in README.md, CLAUDE.md
 #             and STATUS.md (default: the target directory's basename).
 #   --remote  adds it as the `origin` remote when no origin exists.
-#   --apps    comma-separated app names under apps/. Writes merge-gate.toml
-#             with one [gates.frontend.<app>] table per app and lists them
-#             in affected.frontend_apps / claims.app_crates. Without --apps
-#             the shipped merge-gate.toml (one app, "example-app") is kept.
+#   --apps    comma-separated app names under apps/ (no whitespace inside an
+#             entry). Writes merge-gate.toml with one [gates.frontend.<app>]
+#             table per app and lists them in affected.frontend_apps /
+#             claims.app_crates. Without --apps the shipped merge-gate.toml
+#             (one app, "example-app") is kept. An existing merge-gate.toml
+#             is never rewritten without --force-config, in place or not.
 #
 # Creates docs/NORTH_STAR.md from NORTH_STAR_TEMPLATE.md and CLAUDE.md from
 # CLAUDE_TEMPLATE.md when they do not exist yet; never overwrites a file
@@ -36,12 +38,13 @@ TARGET=""
 NAME=""
 REMOTE_URL=""
 APPS=""
+APPS_GIVEN=0
 FORCE_CONFIG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
     --remote) REMOTE_URL="$2"; shift 2 ;;
-    --apps) APPS="$2"; shift 2 ;;
+    --apps) APPS="$2"; APPS_GIVEN=1; shift 2 ;;
     --force-config) FORCE_CONFIG=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "bootstrap.sh: unknown flag '$1'" >&2; usage; exit 1 ;;
@@ -75,6 +78,28 @@ esac
 
 IN_PLACE=0
 [ "$TARGET" = "$SRC" ] && IN_PLACE=1
+
+# Parse --apps up front so an empty list is known before any config
+# decision is made (it downgrades to "keep the shipped config").
+APP_LIST=()
+if [ "$APPS_GIVEN" -eq 1 ]; then
+  IFS_SAVE="$IFS"
+  IFS=','
+  for a in $APPS; do
+    IFS="$IFS_SAVE"
+    [ -n "$a" ] || continue
+    case "$a" in
+      *[[:space:]]*) echo "bootstrap.sh: app name '$a' contains whitespace; entries are comma-separated with no spaces" >&2; exit 1 ;;
+      *[!A-Za-z0-9._-]*) echo "bootstrap.sh: app name '$a' must match [A-Za-z0-9._-]+" >&2; exit 1 ;;
+    esac
+    APP_LIST+=("$a")
+  done
+  IFS="$IFS_SAVE"
+  if [ "${#APP_LIST[@]}" -eq 0 ]; then
+    echo "bootstrap.sh: warning — --apps given but empty; keeping the shipped merge-gate.toml" >&2
+    APPS_GIVEN=0
+  fi
+fi
 
 # --------------------------------------------------------------------------
 # 1. Copy template files into a different target (skipped in place).
@@ -116,9 +141,9 @@ if [ "$IN_PLACE" -eq 0 ]; then
   done
   cp "$SRC/bootstrap.sh" "$TARGET/bootstrap.sh"
   chmod +x "$TARGET/bootstrap.sh"
-  if [ -e "$TARGET/merge-gate.toml" ] && [ "$FORCE_CONFIG" -ne 1 ] && [ -z "$APPS" ]; then
+  if [ -e "$TARGET/merge-gate.toml" ] && [ "$FORCE_CONFIG" -ne 1 ]; then
     echo "  keeping existing merge-gate.toml (pass --force-config to overwrite)"
-  elif [ -z "$APPS" ]; then
+  elif [ "$APPS_GIVEN" -eq 0 ]; then
     cp "$SRC/merge-gate.toml" "$TARGET/merge-gate.toml"
     echo "  merge-gate.toml"
   fi
@@ -134,23 +159,8 @@ fi
 
 write_config_for_apps() {
   local out="$TARGET/merge-gate.toml"
-  local -a apps=()
-  local IFS_SAVE="$IFS" a
-  IFS=','
-  for a in $APPS; do
-    IFS="$IFS_SAVE"
-    a="${a// /}"
-    [ -n "$a" ] || continue
-    case "$a" in
-      *[!A-Za-z0-9._-]*) echo "bootstrap.sh: app name '$a' must match [A-Za-z0-9._-]+" >&2; exit 1 ;;
-    esac
-    apps+=("$a")
-  done
-  IFS="$IFS_SAVE"
-  if [ "${#apps[@]}" -eq 0 ]; then
-    echo "bootstrap.sh: --apps given but no app names parsed" >&2
-    exit 1
-  fi
+  local -a apps=("${APP_LIST[@]}")
+  local a
   local quoted=""
   for a in "${apps[@]}"; do
     quoted="${quoted:+$quoted, }\"$a\""
@@ -226,8 +236,8 @@ EOF
   echo "  merge-gate.toml (apps: ${apps[*]})"
 }
 
-if [ -n "$APPS" ]; then
-  if [ -e "$TARGET/merge-gate.toml" ] && [ "$FORCE_CONFIG" -ne 1 ] && [ "$IN_PLACE" -eq 1 ]; then
+if [ "$APPS_GIVEN" -eq 1 ]; then
+  if [ -e "$TARGET/merge-gate.toml" ] && [ "$FORCE_CONFIG" -ne 1 ]; then
     echo "bootstrap.sh: merge-gate.toml exists; pass --force-config to rewrite it for --apps" >&2
     exit 1
   fi
@@ -311,10 +321,14 @@ if [ -n "$REMOTE_URL" ]; then
 fi
 
 # --------------------------------------------------------------------------
-# 5. Validate.
+# 5. Validate, then regenerate the claims registry for the new config.
 # --------------------------------------------------------------------------
 
 if ! ( cd "$TARGET" && python3 scripts/mergegate_config.py validate ); then
+  exit 1
+fi
+if ! ( cd "$TARGET" && python3 scripts/claims.py sync-registry ); then
+  echo "bootstrap.sh: claims.py sync-registry failed" >&2
   exit 1
 fi
 

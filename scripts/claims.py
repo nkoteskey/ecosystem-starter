@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mergegate_config
+from mergegate_scan import glob_to_regex
 
 # Bounded retry for the individual git ref pushes/fetches a bulk `release
 # --branch` performs — one per touched service. A transient network failure
@@ -48,6 +49,31 @@ import mergegate_config
 # conflict (wrong holder, non-fast-forward) surfaces immediately.
 RELEASE_RETRY_ATTEMPTS = 3
 RELEASE_RETRY_BASE_DELAY = 0.5  # seconds; backoff is base_delay * 2**attempt
+
+# A push refused for authentication or permission reasons is never
+# "offline": treating it as such once recorded a local-only claim for a
+# push that the remote had actively rejected. These are checked first.
+# Not on the list: "access rights" — git appends "Please make sure you have
+# the correct access rights and the repository exists." to EVERY
+# could-not-read-from-remote failure, reachable or not, so it carries no
+# signal; unreachability is confirmed with `git ls-remote` instead.
+AUTH_ERROR_PATTERNS = [
+    r"permission denied",
+    r"\b403\b",
+    r"\b401\b",
+    r"authentication failed",
+    r"remote rejected",
+    r"could not read username",
+    r"invalid username or password",
+    r"publickey",
+    r"repository not found",
+    r"not authorized",
+]
+_AUTH_ERROR_RE = re.compile("|".join(AUTH_ERROR_PATTERNS), re.IGNORECASE)
+
+# Claim records are single-line TOML strings; a newline or other control
+# character in an intent would let one record inject keys into another.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 NETWORK_ERROR_MARKERS = [
     "could not resolve host",
@@ -104,6 +130,10 @@ def valid_service_id(service: str) -> bool:
     return bool(SERVICE_ID_RE.match(service)) and ".." not in service
 
 
+def has_control_chars(text: str) -> bool:
+    return _CONTROL_RE.search(text) is not None
+
+
 def valid_branch_name(branch: str) -> bool:
     if not branch or branch.startswith("-"):
         return False
@@ -119,7 +149,14 @@ def valid_branch_name(branch: str) -> bool:
 
 
 def toml_string(value: Any) -> str:
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    escaped = (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
     return f'"{escaped}"'
 
 
@@ -139,33 +176,10 @@ def serialize_claim(record: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Glob matching — implements ** across path separators, plain shell globs
-# otherwise. Used against owned-path patterns from the registry.
+# Glob matching — `**` across path separators, plain shell globs otherwise
+# (the one implementation lives in mergegate_scan). Used against owned-path
+# patterns from the registry.
 # --------------------------------------------------------------------------
-
-
-def glob_to_regex(pattern: str) -> str:
-    out = []
-    i, n = 0, len(pattern)
-    while i < n:
-        c = pattern[i]
-        if c == "*" and i + 1 < n and pattern[i + 1] == "*":
-            i += 2
-            if i < n and pattern[i] == "/":
-                i += 1
-                out.append("(?:.*/)?")
-            else:
-                out.append(".*")
-        elif c == "*":
-            out.append("[^/]*")
-            i += 1
-        elif c == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(c))
-            i += 1
-    return "^" + "".join(out) + "$"
 
 
 _GLOB_CACHE: Dict[str, re.Pattern[str]] = {}
@@ -203,16 +217,20 @@ def current_branch() -> str:
 
 
 def default_session() -> str:
+    """The session label written into a claim record. With
+    MERGE_GATE_SESSION set, that value (which is how to opt out of the
+    default); otherwise `user@host:tty`, which is published to everyone who
+    can read the remote's claim refs. Control characters are replaced."""
     sid = os.environ.get("MERGE_GATE_SESSION")
     if sid:
-        return sid
+        return _CONTROL_RE.sub("_", sid)
     user = os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
     host = socket.gethostname()
     try:
         tty = os.ttyname(0)
     except OSError:
         tty = "notty"
-    return f"{user}@{host}:{tty}"
+    return _CONTROL_RE.sub("_", f"{user}@{host}:{tty}")
 
 
 def utcnow() -> datetime:
@@ -231,9 +249,25 @@ def is_expired(record: dict) -> bool:
     return parse_iso(record["expires_at"]) <= utcnow()
 
 
+def is_auth_error(err_text: str) -> bool:
+    return _AUTH_ERROR_RE.search(err_text or "") is not None
+
+
 def is_network_error(err_text: str) -> bool:
     low = (err_text or "").lower()
     return any(marker in low for marker in NETWORK_ERROR_MARKERS)
+
+
+def remote_reachable() -> bool:
+    """Confirm (rather than infer from an error string) whether the remote
+    can be contacted at all: a `ls-remote` for HEAD that finds it (0) or
+    finds nothing but talked to the remote (2) means reachable."""
+    res = run(["git", "ls-remote", "--exit-code", REMOTE, "HEAD"])
+    return res.returncode in (0, 2)
+
+
+class BadRecord(RuntimeError):
+    """A claim ref exists but its content does not parse as a record."""
 
 
 def retry_on_network_error(
@@ -307,8 +341,13 @@ def claim_ref(service: str) -> str:
     return f"{REF_PREFIX}{service}"
 
 
+def claim_file(service: str) -> str:
+    """Path of the record inside the orphan commit — follows `claims.dir`."""
+    return f"{CLAIMS_DIR}/{service}.claim"
+
+
 def build_orphan_commit(service: str, content: str) -> str:
-    """Commit `content` as claims/<service>.claim, alone, as an orphan
+    """Commit `content` as <claims.dir>/<service>.claim, alone, as an orphan
     commit — via a temp GIT_INDEX_FILE, never touching the working tree or
     the real index."""
     fd, index_path = tempfile.mkstemp(prefix="merge-gate-claim-index-")
@@ -330,7 +369,7 @@ def build_orphan_commit(service: str, content: str) -> str:
                 "update-index",
                 "--add",
                 "--cacheinfo",
-                f"100644,{blob_sha},claims/{service}.claim",
+                f"100644,{blob_sha},{claim_file(service)}",
             ],
             env=env,
         )
@@ -411,10 +450,13 @@ def fetch_and_parse(service: str) -> dict:
     res = run(["git", "fetch", REMOTE, claim_ref(service)])
     if res.returncode != 0:
         raise RuntimeError((res.stderr or res.stdout).strip())
-    show = run(["git", "show", f"FETCH_HEAD:claims/{service}.claim"])
+    show = run(["git", "show", f"FETCH_HEAD:{claim_file(service)}"])
     if show.returncode != 0:
         raise RuntimeError((show.stderr or show.stdout).strip())
-    return parse_toml_lite(show.stdout)
+    try:
+        return parse_toml_lite(show.stdout)
+    except mergegate_config.ConfigError as e:
+        raise BadRecord(f"claim record for '{service}' is malformed: {e}") from e
 
 
 # --------------------------------------------------------------------------
@@ -855,6 +897,12 @@ def cmd_claim(args) -> int:
     if not valid_branch_name(branch):
         print(f"claim: '{branch}' is not a valid branch name")
         return 1
+    if has_control_chars(args.intent):
+        print("claim: --intent must be one line with no control characters")
+        return 1
+    if args.session and has_control_chars(args.session):
+        print("claim: --session must be one line with no control characters")
+        return 1
     session = args.session or default_session()
     now = utcnow()
     record = {
@@ -873,16 +921,39 @@ def cmd_claim(args) -> int:
         print(f"claimed '{args.service}' for '{branch}' until {record['expires_at']}")
         return 0
 
+    if is_auth_error(err):
+        print(
+            f"claim: FATAL — {REMOTE} refused the push (authentication or "
+            f"permission); the claim was NOT recorded anywhere: {err.strip()}",
+            file=sys.stderr,
+        )
+        return 1
+
     if is_network_error(err):
+        if remote_reachable():
+            print(
+                f"claim: push failed, but {REMOTE} is reachable — not an offline "
+                f"situation; the claim was NOT recorded: {err.strip()}",
+                file=sys.stderr,
+            )
+            return 1
+        if not args.allow_offline:
+            print(
+                f"claim: {REMOTE} is unreachable — the claim was NOT published. "
+                f"Re-run when online, or pass --allow-offline to record a local-only "
+                f"claim that the next online invocation publishes: {err.strip()}",
+                file=sys.stderr,
+            )
+            return 1
         record["local_only"] = True
         mirror_write(args.service, record)
         print(
-            f"WARNING: {REMOTE} unreachable — '{args.service}' claimed locally "
-            f"only (local_only=true). Re-run claims.py once online to "
-            f"publish the claim: {err.strip()}",
+            f"WARNING: {REMOTE} unreachable — '{args.service}' recorded locally "
+            f"only (local_only=true); it is NOT a published claim until the next "
+            f"claims.py invocation with network access reconciles it: {err.strip()}",
             file=sys.stderr,
         )
-        return 0
+        return 3
 
     try:
         remote_sha = ls_remote_ref(args.service)
@@ -1246,6 +1317,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_claim.add_argument("--branch")
     p_claim.add_argument("--session")
     p_claim.add_argument("--takeover", action="store_true")
+    p_claim.add_argument(
+        "--allow-offline",
+        action="store_true",
+        help="if the remote is confirmed unreachable, record a local-only claim and "
+        "exit 3 (never 0) instead of failing; the next online invocation publishes it",
+    )
 
     p_renew = sub.add_parser("renew", help="extend an owned claim's expiry")
     p_renew.add_argument("service", nargs="?")

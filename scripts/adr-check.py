@@ -12,11 +12,16 @@ THE MERGE-BASE has a `- **Status:**` line beginning `Accepted`:
     `Supersedes:` naming ADR-NNNN.
   - Allowed with the nonsubstantive marker (default `[adr-nonsubstantive]`)
     in a commit message of the range that ITSELF touches that ADR file (a
-    marker on an unrelated commit does not unlock anything): the canonical
-    sections (`adr.section_headings`) stay byte-identical between the
-    merge-base and head versions, AND the `- **Status:**` line, the H1
-    title line, the `- **Supersedes:**` / `- **Sources:**` header lines are
-    unchanged, AND no `## ` heading is added, removed, or renamed.
+    marker on an unrelated commit does not unlock anything): EVERY `## `
+    section body — canonical or not — stays byte-identical between the
+    merge-base and head versions, EVERY `- **Key:**` metadata line (Status,
+    Acceptance, Date, Deciders, Supersedes, Sources, …) is unchanged, the
+    H1 title is unchanged, and no `## ` heading is added, removed, or
+    renamed. What may change is only the text outside any section and
+    outside the metadata lines: in practice the derivation blockquote and
+    any prose between the header and the first section (a broken link, a
+    typo there). A typo inside a section body is fixed by a superseding
+    record, not in place.
   - Everything else fails.
 
 Deleting or renaming any `<adr.dir>/NNNN-*.md` fails, regardless of its
@@ -43,10 +48,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mergegate_config
 
 STATUS_LINE_RE = re.compile(r"^- \*\*Status:\*\*\s*(.+?)\s*$")
+METADATA_LINE_RE = re.compile(r"^- \*\*([^*]+):\*\*.*$")
 SUPERSEDED_BY_RE = re.compile(r"^Superseded by ADR-(\d{4})\s*$")
 TITLE_LINE_RE = re.compile(r"^# .*$")
-SUPERSEDES_LINE_RE = re.compile(r"^- \*\*Supersedes:\*\*.*$")
-SOURCES_LINE_RE = re.compile(r"^- \*\*Sources:\*\*.*$")
 HEADING_LINE_RE = re.compile(r"^## .*$")
 
 
@@ -57,6 +61,8 @@ class Rules:
         self.dir: str = adr_cfg["dir"].strip("/")
         self.numbered_re = re.compile(rf"^{re.escape(self.dir)}/(\d{{4}})-.*\.md$")
         self.ignored_basenames = set(adr_cfg["ignored_basenames"])
+        # Kept for configuration compatibility and reporting; the marker path
+        # compares EVERY section body, not only these.
         self.section_headings: List[str] = list(adr_cfg["section_headings"])
         self.marker: str = adr_cfg["nonsubstantive_marker"]
 
@@ -157,22 +163,15 @@ def has_nonsubstantive_marker_for_path(
 
 def extract_header_signature(text: str) -> Dict[str, object]:
     """The parts of an ADR file the nonsubstantive path must leave untouched
-    beyond the canonical sections: the H1 title, the Status line, the
-    Supersedes/Sources header lines, and the full ordered list of '## '
-    headings (so a heading cannot be silently added/removed/renamed)."""
+    besides the section bodies: the H1 title, every `- **Key:**` metadata
+    line in order (Status, Acceptance, Date, Deciders, Supersedes, Sources,
+    and any other), and the full ordered list of '## ' headings (so a
+    heading cannot be silently added, removed or renamed)."""
     lines = text.splitlines()
     title = next((ln for ln in lines if TITLE_LINE_RE.match(ln)), None)
-    status = next((ln for ln in lines if STATUS_LINE_RE.match(ln)), None)
-    supersedes = next((ln for ln in lines if SUPERSEDES_LINE_RE.match(ln)), None)
-    sources = next((ln for ln in lines if SOURCES_LINE_RE.match(ln)), None)
+    metadata = [ln for ln in lines if METADATA_LINE_RE.match(ln)]
     headings = [ln for ln in lines if HEADING_LINE_RE.match(ln)]
-    return {
-        "title": title,
-        "status": status,
-        "supersedes": supersedes,
-        "sources": sources,
-        "headings": headings,
-    }
+    return {"title": title, "metadata": metadata, "headings": headings}
 
 
 def base_status_value(text: str) -> Optional[str]:
@@ -183,25 +182,26 @@ def base_status_value(text: str) -> Optional[str]:
     return None
 
 
-def extract_sections(text: str, section_headings: List[str]) -> Dict[str, str]:
-    lines = text.splitlines()
+def extract_sections(text: str) -> Dict[str, str]:
+    """Every `## ` section's body, keyed by heading (a repeated heading gets
+    a numeric suffix so nothing is silently merged). Text before the first
+    section is not a section and is not returned."""
     out: Dict[str, str] = {}
     current: Optional[str] = None
     buf: List[str] = []
-    for line in lines:
-        if line.strip() in section_headings:
+    for line in text.splitlines():
+        if HEADING_LINE_RE.match(line):
             if current is not None:
                 out[current] = "\n".join(buf)
-            current = line.strip()
+            key = line.strip()
+            n = 2
+            while key in out:
+                key = f"{line.strip()} #{n}"
+                n += 1
+            current = key
             buf = []
-        elif line.startswith("## "):
-            if current is not None:
-                out[current] = "\n".join(buf)
-            current = None
-            buf = []
-        else:
-            if current is not None:
-                buf.append(line)
+        elif current is not None:
+            buf.append(line)
     if current is not None:
         out[current] = "\n".join(buf)
     return out
@@ -303,29 +303,38 @@ def check(
             continue
 
         # Path 2: nonsubstantive marker (in a commit that itself touches this
-        # file) + byte-identical sections + unchanged header signature.
+        # file) + every section body byte-identical + every metadata line,
+        # the title and the heading set unchanged.
         if has_nonsubstantive_marker_for_path(mb, head, path, rules.marker, cwd=cwd):
-            base_sections = extract_sections(base_text, rules.section_headings)
-            head_sections = extract_sections(head_text or "", rules.section_headings)
+            base_sections = extract_sections(base_text)
+            head_sections = extract_sections(head_text or "")
+            all_headings = list(base_sections) + [
+                h for h in head_sections if h not in base_sections
+            ]
             non_identical = [
-                h for h in rules.section_headings if base_sections.get(h) != head_sections.get(h)
+                h for h in all_headings if base_sections.get(h) != head_sections.get(h)
             ]
 
             base_sig = extract_header_signature(base_text)
             head_sig = extract_header_signature(head_text or "")
             problems: List[str] = []
+            if base_sig["headings"] != head_sig["headings"]:
+                problems.append("a '## ' heading was added, removed, or renamed")
             if non_identical:
                 problems.append("section(s) not byte-identical: " + ", ".join(non_identical))
             if base_sig["title"] != head_sig["title"]:
                 problems.append("H1 title line changed")
-            if base_sig["status"] != head_sig["status"]:
-                problems.append("Status line changed")
-            if base_sig["supersedes"] != head_sig["supersedes"]:
-                problems.append("Supersedes: header line changed")
-            if base_sig["sources"] != head_sig["sources"]:
-                problems.append("Sources: header line changed")
-            if base_sig["headings"] != head_sig["headings"]:
-                problems.append("a '## ' heading was added, removed, or renamed")
+            base_meta = base_sig["metadata"]
+            head_meta = head_sig["metadata"]
+            assert isinstance(base_meta, list) and isinstance(head_meta, list)
+            if base_meta != head_meta:
+                changed = sorted(
+                    {
+                        (METADATA_LINE_RE.match(ln).group(1) if METADATA_LINE_RE.match(ln) else ln)
+                        for ln in set(base_meta) ^ set(head_meta)
+                    }
+                )
+                problems.append("metadata line(s) changed: " + ", ".join(changed))
 
             if not problems:
                 continue

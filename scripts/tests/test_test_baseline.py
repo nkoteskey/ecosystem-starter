@@ -313,6 +313,11 @@ class TestCompareLogic(TempDirCase):
         (self.tmp / "cargo-test.log").write_text("\n".join(lines) + "\n")
 
     def _baseline(self, suites: dict, flaky_retry=None) -> Path:
+        # flaky_retry: (suite, test) tuples, or raw entries (dicts).
+        entries = [e if isinstance(e, dict) else _flaky(e[0], e[1]) for e in flaky_retry or []]
+        return self._write_baseline(suites, entries)
+
+    def _write_baseline(self, suites: dict, flaky_retry: list) -> Path:
         path = self.tmp / "baseline.json"
         path.write_text(
             json.dumps(
@@ -321,7 +326,7 @@ class TestCompareLogic(TempDirCase):
                     "recorded_at": "2026-01-01T00:00:00Z",
                     "commit": "abc123",
                     "train": None,
-                    "flaky_retry": flaky_retry or [],
+                    "flaky_retry": flaky_retry,
                     "suites": suites,
                 }
             )
@@ -465,23 +470,94 @@ class TestCompareLogic(TempDirCase):
         ns = _ns(results=str(self.tmp), baseline=str(baseline_path), range=None)
         self.assertEqual(tb.cmd_compare(ns), 0)
 
-    def test_flaky_retry_listed_failure_does_not_block_but_is_reported(self):
+    def test_flaky_listed_test_that_still_fails_is_r1(self):
+        # A listing buys one re-run by the retry gate, nothing more: if the
+        # results still show the test failing, it is a regression.
         self._write_results({"cargo:foo": {"tests::x": "failed"}})
         baseline_path = self._baseline(
             {"cargo:foo": {"passed": ["tests::x"], "failed": [], "ignored": []}},
-            flaky_retry=["cargo:foo\ttests::x"],
+            flaky_retry=[("cargo:foo", "tests::x")],
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ns = _ns(results=str(self.tmp), baseline=str(baseline_path), range=None)
+            rc = tb.cmd_compare(ns)
+        self.assertEqual(rc, 1)
+        self.assertIn("R1", buf.getvalue())
+        self.assertIn("no passing retry observed", buf.getvalue())
+        self.assertNotIn("0 regressions", buf.getvalue())
+
+    def test_flaky_listed_test_that_passed_its_rerun_is_fine(self):
+        # The retry gate appends the re-run to the same log; the last
+        # observation wins, so a passing re-run clears the failure.
+        (self.tmp / "cargo-test.log").write_text(
+            "     Running unittests src/lib.rs (target/debug/deps/foo-cafefeed)\n"
+            "test tests::x ... FAILED\n"
+            "     Running unittests src/lib.rs (target/debug/deps/foo-cafefeed)\n"
+            "test tests::x ... ok\n"
+        )
+        baseline_path = self._baseline(
+            {"cargo:foo": {"passed": ["tests::x"], "failed": [], "ignored": []}},
+            flaky_retry=[("cargo:foo", "tests::x")],
         )
         ns = _ns(results=str(self.tmp), baseline=str(baseline_path), range=None)
         self.assertEqual(tb.cmd_compare(ns), 0)
 
-    def test_flaky_retry_keyed_by_suite_does_not_leak_across_suites(self):
-        self._write_results({"cargo:bar": {"tests::x": "failed"}})
+    def test_flaky_entry_requires_reason_and_expiry(self):
+        self._write_results({"cargo:foo": {"tests::x": "passed"}})
+        for bad in (
+            "cargo:foo\ttests::x",
+            {"suite": "cargo:foo", "test": "tests::x"},
+            {"suite": "cargo:foo", "test": "tests::x", "reason": "", "expires": "2099-01-01"},
+            {"suite": "cargo:foo", "test": "tests::x", "reason": "r", "expires": "soon"},
+            {"suite": "cargo:foo", "test": "tests::x", "reason": "r", "expires": "2099-13-45"},
+        ):
+            baseline_path = self._write_baseline(
+                {"cargo:foo": {"passed": ["tests::x"], "failed": [], "ignored": []}}, [bad]
+            )
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                rc = tb.main(
+                    ["compare", "--results", str(self.tmp), "--baseline", str(baseline_path)]
+                )
+            self.assertEqual(rc, 1, bad)
+            self.assertIn("flaky_retry", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+
+    def test_expired_flaky_entry_is_ignored_with_a_warning(self):
+        self._write_results({"cargo:foo": {"tests::x": "failed"}})
         baseline_path = self._baseline(
-            {"cargo:bar": {"passed": ["tests::x"], "failed": [], "ignored": []}},
-            flaky_retry=["cargo:foo\ttests::x"],
+            {"cargo:foo": {"passed": ["tests::x"], "failed": [], "ignored": []}},
+            flaky_retry=[_flaky("cargo:foo", "tests::x", expires="2000-01-01")],
         )
-        ns = _ns(results=str(self.tmp), baseline=str(baseline_path), range=None)
-        self.assertEqual(tb.cmd_compare(ns), 1)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            ns = _ns(results=str(self.tmp), baseline=str(baseline_path), range=None)
+            rc = tb.cmd_compare(ns)
+        self.assertEqual(rc, 1)
+        self.assertIn("expired", err.getvalue())
+
+    def test_malformed_baseline_json_fails_with_file_name_no_traceback(self):
+        self._write_results({"cargo:foo": {"tests::x": "passed"}})
+        baseline_path = self.tmp / "baseline.json"
+        baseline_path.write_text("{ not json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = tb.main(["compare", "--results", str(self.tmp), "--baseline", str(baseline_path)])
+        self.assertEqual(rc, 1)
+        self.assertIn(str(baseline_path), err.getvalue())
+        self.assertIn("not valid JSON", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+
+    def test_malformed_results_json_fails_with_file_name_no_traceback(self):
+        (self.tmp / "vitest-app-a.json").write_text("[1, 2,")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = tb.main(["collect", "--results", str(self.tmp)])
+        self.assertEqual(rc, 1)
+        self.assertIn("vitest-app-a.json", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 class TestRetryList(TempDirCase):
@@ -508,7 +584,7 @@ class TestRetryList(TempDirCase):
             json.dumps(
                 {
                     "schema": 1,
-                    "flaky_retry": ["cargo:example_contracts\ttests::flaky_one"],
+                    "flaky_retry": [_flaky("cargo:example_contracts", "tests::flaky_one")],
                     "suites": {},
                 }
             )
@@ -523,6 +599,10 @@ class TestRetryList(TempDirCase):
         self.assertIn("cargo:example_contracts\ttests::flaky_one", out)
         self.assertNotIn("not_flaky", out)
         self.assertNotIn("::z", out)  # vitest suites are never retried
+
+
+def _flaky(suite: str, test: str, expires: str = "2099-12-31") -> dict:
+    return {"suite": suite, "test": test, "reason": "fixture", "expires": expires}
 
 
 def _ns(**kwargs):

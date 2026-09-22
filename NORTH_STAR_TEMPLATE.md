@@ -9,7 +9,7 @@ until it is revised in place.
 
 This file is a method, not a manifesto. Each section below says **what to
 write**, **why it matters**, and shows **one worked example** for a
-fictional product — a neighbourhood food co-op app called *Crate*, where
+fictional product — a neighborhood food co-op app called *Crate*, where
 local growers list surplus produce, members order it, and volunteers
 deliver it by bike — so the shape is visible without the words being
 reusable. Do not copy the example; write your own.
@@ -136,7 +136,7 @@ architectural decision record checks itself against.
   stub. No code outside that module knows the processor's name.
 - **Identity is a membership number plus a device key.** The device key
   signs every listing and claim; the membership number is what the
-  committee recognises. Losing a phone means re-pairing, not recovering a
+  committee recognizes. Losing a phone means re-pairing, not recovering a
   password.
 - **Early posture:** for the first year the relay is a single machine
   under the committee's desk, backups are a nightly export the treasurer
@@ -146,6 +146,12 @@ architectural decision record checks itself against.
 ---
 
 ## 5. The economic model
+
+> **Public or private?** Decide before writing this section. Fee numbers,
+> revenue splits and partner names in a public repository are quotable
+> by anyone, forever, including by the people you negotiate with. If the
+> repository is public, write the *mechanism* here and keep the numbers
+> in a private document this section points to.
 
 **What to write.** Every flow of money, one subsection each: who pays,
 who is paid, what the software's cut is (a number or an explicit zero),
@@ -222,6 +228,13 @@ checks.
 
 ## 7. Legal posture
 
+> **Public or private?** Decide before writing this section. An
+> "unverified" legal position, a jurisdiction you are avoiding, or a
+> feature you will not build until reviewed reads very differently in a
+> public repository than in a private one. If the repository is public,
+> keep this section to what you would say to a customer, and keep the
+> working notes private.
+
 **What to write.** Not legal advice — the *shape* of the operation as you
 understand it, so that engineering decisions do not accidentally change
 it: whether you hold money, whether you are a marketplace or a vendor,
@@ -236,7 +249,7 @@ lets a reviewer ask "does this change it?" of every proposal.
 **Worked example.**
 
 - **Money.** The co-op does not hold member funds; the processor does,
-  under its own licence. The share is a pre-payment for goods, not stored
+  under its own license. The share is a pre-payment for goods, not stored
   value. *Unverified with an accountant; a question stands until it is.*
 - **Marketplace or vendor.** The co-op is a marketplace: growers sell,
   members buy, the co-op facilitates. Receipts name the grower. Product

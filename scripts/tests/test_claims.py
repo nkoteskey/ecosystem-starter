@@ -115,6 +115,115 @@ class GlobMatchingTests(unittest.TestCase):
         self.assertFalse(claims.glob_matches("apps/*/package.json", "apps/app-a/sub/package.json"))
 
 
+class FailureClassificationTests(unittest.TestCase):
+    """`claim` must never exit 0 for a claim that was not published, and must
+    tell an authentication refusal apart from being offline. In-process:
+    the push and probe helpers are monkeypatched, nothing touches a remote."""
+
+    def setUp(self):
+        for name in ("mirror_write", "build_orphan_commit", "load_registry", "current_branch"):
+            patch = mock.patch.object(claims, name)
+            patch.start()
+            self.addCleanup(patch.stop)
+        claims.build_orphan_commit.return_value = "deadbeef"
+        claims.load_registry.return_value = {"svc": {}}
+        claims.current_branch.return_value = "wt/mine"
+        valid_branch = mock.patch.object(claims, "valid_branch_name", return_value=True)
+        valid_branch.start()
+        self.addCleanup(valid_branch.stop)
+
+    @staticmethod
+    def _args(**overrides):
+        base = dict(
+            service="svc",
+            intent="test",
+            ttl_hours=8.0,
+            branch=None,
+            session="s",
+            takeover=False,
+            allow_offline=False,
+        )
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def _claim_with_push_error(self, err, reachable=None, **overrides):
+        with (
+            mock.patch.object(claims, "push_create", return_value=(False, err)),
+            mock.patch.object(claims, "remote_reachable", return_value=reachable),
+            mock.patch.object(claims, "ls_remote_ref", return_value=None),
+        ):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                rc = claims.cmd_claim(self._args(**overrides))
+        return rc, stderr.getvalue()
+
+    def test_auth_failures_are_fatal_and_record_nothing(self):
+        for err in (
+            "remote: Permission denied (publickey).",
+            "fatal: unable to access 'https://host/': The requested URL returned error: 403",
+            "fatal: Authentication failed for 'https://host/'",
+            "ERROR: Repository not found.\nfatal: Could not read from remote repository.",
+            "remote: ! [remote rejected] deadbeef -> refs/claims/svc (pre-receive hook declined)",
+            "fatal: could not read Username for 'https://host': terminal prompts disabled",
+        ):
+            rc, err_out = self._claim_with_push_error(err, allow_offline=True)
+            self.assertEqual(rc, 1, err)
+            self.assertIn("FATAL", err_out)
+            claims.mirror_write.assert_not_called()
+
+    def test_git_boilerplate_about_access_rights_is_not_treated_as_auth(self):
+        # git appends this sentence to every could-not-read-from-remote
+        # failure; an unreachable remote must still take the offline path.
+        rc, err_out = self._claim_with_push_error(
+            "fatal: 'x' does not appear to be a git repository\n"
+            "fatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights\nand the repository exists.",
+            reachable=False,
+            allow_offline=True,
+        )
+        self.assertEqual(rc, 3, err_out)
+        self.assertNotIn("FATAL", err_out)
+
+    def test_network_error_with_reachable_remote_is_an_error_not_offline(self):
+        rc, err_out = self._claim_with_push_error(
+            "fatal: unable to access 'https://host/': Connection timed out",
+            reachable=True,
+            allow_offline=True,
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("reachable", err_out)
+        claims.mirror_write.assert_not_called()
+
+    def test_unreachable_without_flag_fails_and_records_nothing(self):
+        rc, err_out = self._claim_with_push_error(
+            "ssh: connect to host example port 22: Network is unreachable", reachable=False
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("--allow-offline", err_out)
+        claims.mirror_write.assert_not_called()
+
+    def test_unreachable_with_flag_records_local_only_and_exits_3(self):
+        rc, err_out = self._claim_with_push_error(
+            "fatal: Could not read from remote repository.", reachable=False, allow_offline=True
+        )
+        self.assertEqual(rc, 3)
+        self.assertIn("NOT a published claim", err_out)
+        record = claims.mirror_write.call_args[0][1]
+        self.assertTrue(record["local_only"])
+
+    def test_control_characters_in_intent_and_session_are_rejected(self):
+        for field in ("intent", "session"):
+            with mock.patch.object(claims, "push_create") as push:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = claims.cmd_claim(self._args(**{field: "line one\nline two"}))
+                self.assertEqual(rc, 1, field)
+                push.assert_not_called()
+
+    def test_default_session_strips_control_characters(self):
+        with mock.patch.dict(os.environ, {"MERGE_GATE_SESSION": "a\nb\tc"}):
+            self.assertEqual(claims.default_session(), "a_b_c")
+
+
 class ServiceIdTests(unittest.TestCase):
     def test_valid_ids(self):
         for ok in ("core", "shared-ui", "a.b_c", "x0"):
@@ -141,6 +250,13 @@ class ClaimRecordTests(unittest.TestCase):
         self.assertEqual(svc["paths"], [".github/**", "scripts/claims.py"])
         self.assertEqual(svc["consumers"], ["app-a", "app-b"])
         self.assertEqual(svc["source"], "issue #12 — the # is inside a string")
+
+    def test_toml_string_escapes_control_characters(self):
+        text = claims.toml_string("a\nb\rc\td")
+        self.assertEqual(text, '"a\\nb\\rc\\td"')
+        parsed = claims.parse_toml_lite(f"x = {text}\ny = 1\n")
+        self.assertEqual(parsed["x"], "a\nb\rc\td")
+        self.assertEqual(parsed["y"], 1)
 
     def test_claim_record_round_trip_with_previous(self):
         record = {
@@ -299,13 +415,14 @@ class ReleaseBranchRetryTests(unittest.TestCase):
                     return False, "fatal: unable to access 'https://origin/': Connection timed out"
             return True, ""
 
-        with mock.patch.object(
-            claims, "ls_remote_refs", return_value=dict(refs)
-        ), mock.patch.object(
-            claims, "ls_remote_ref", side_effect=lambda svc: refs[svc]
-        ), mock.patch.object(
-            claims, "fetch_and_parse", side_effect=lambda svc: dict(records[svc])
-        ), mock.patch.object(claims, "push_delete", side_effect=fake_push_delete):
+        with (
+            mock.patch.object(claims, "ls_remote_refs", return_value=dict(refs)),
+            mock.patch.object(claims, "ls_remote_ref", side_effect=lambda svc: refs[svc]),
+            mock.patch.object(
+                claims, "fetch_and_parse", side_effect=lambda svc: dict(records[svc])
+            ),
+            mock.patch.object(claims, "push_delete", side_effect=fake_push_delete),
+        ):
             rc = claims.cmd_release(self._release_branch_args(branch))
 
         self.assertEqual(rc, 0)
@@ -327,13 +444,12 @@ class ReleaseBranchRetryTests(unittest.TestCase):
                     )
             return dict(records[service])
 
-        with mock.patch.object(
-            claims, "ls_remote_refs", return_value=dict(refs)
-        ), mock.patch.object(
-            claims, "ls_remote_ref", side_effect=lambda svc: refs[svc]
-        ), mock.patch.object(
-            claims, "fetch_and_parse", side_effect=fake_fetch_and_parse
-        ), mock.patch.object(claims, "push_delete", return_value=(True, "")):
+        with (
+            mock.patch.object(claims, "ls_remote_refs", return_value=dict(refs)),
+            mock.patch.object(claims, "ls_remote_ref", side_effect=lambda svc: refs[svc]),
+            mock.patch.object(claims, "fetch_and_parse", side_effect=fake_fetch_and_parse),
+            mock.patch.object(claims, "push_delete", return_value=(True, "")),
+        ):
             rc = claims.cmd_release(self._release_branch_args(branch))
 
         self.assertEqual(rc, 0)
@@ -350,13 +466,14 @@ class ReleaseBranchRetryTests(unittest.TestCase):
                 return False, "fatal: unable to access 'https://origin/': Connection timed out"
             return True, ""
 
-        with mock.patch.object(
-            claims, "ls_remote_refs", return_value=dict(refs)
-        ), mock.patch.object(
-            claims, "ls_remote_ref", side_effect=lambda svc: refs[svc]
-        ), mock.patch.object(
-            claims, "fetch_and_parse", side_effect=lambda svc: dict(records[svc])
-        ), mock.patch.object(claims, "push_delete", side_effect=fake_push_delete):
+        with (
+            mock.patch.object(claims, "ls_remote_refs", return_value=dict(refs)),
+            mock.patch.object(claims, "ls_remote_ref", side_effect=lambda svc: refs[svc]),
+            mock.patch.object(
+                claims, "fetch_and_parse", side_effect=lambda svc: dict(records[svc])
+            ),
+            mock.patch.object(claims, "push_delete", side_effect=fake_push_delete),
+        ):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 rc = claims.cmd_release(self._release_branch_args(branch))
@@ -678,11 +795,23 @@ class ClaimProtocolTestCase(unittest.TestCase):
 
         git(clone, "checkout", "-q", "-b", "wt/mine")
         git(clone, "remote", "set-url", "origin", str(bogus_origin))
+        # Without --allow-offline an unreachable remote is a failure and
+        # records nothing.
+        res0 = run_claims(clone, "claim", "reconcile-svc", "--intent", "offline test")
+        self.assertEqual(res0.returncode, 1, res0.stdout + res0.stderr)
+        self.assertFalse(self._mirror_file(clone, "reconcile-svc").exists())
         res = run_claims(
-            clone, "claim", "reconcile-svc", "--intent", "offline test", "--ttl-hours", "8"
+            clone,
+            "claim",
+            "reconcile-svc",
+            "--intent",
+            "offline test",
+            "--ttl-hours",
+            "8",
+            "--allow-offline",
         )
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("claimed locally only", res.stdout + res.stderr)
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("recorded locally only", res.stdout + res.stderr)
 
         mirror_file = self._mirror_file(clone, "reconcile-svc")
         self.assertTrue(mirror_file.exists())
@@ -709,8 +838,10 @@ class ClaimProtocolTestCase(unittest.TestCase):
 
         git(clone, "checkout", "-q", "-b", "wt/mine")
         git(clone, "remote", "set-url", "origin", str(bogus_origin))
-        res1 = run_claims(clone, "claim", "conflict-svc", "--intent", "offline attempt")
-        self.assertEqual(res1.returncode, 0, res1.stdout + res1.stderr)
+        res1 = run_claims(
+            clone, "claim", "conflict-svc", "--intent", "offline attempt", "--allow-offline"
+        )
+        self.assertEqual(res1.returncode, 3, res1.stdout + res1.stderr)
         mirror_file = self._mirror_file(clone, "conflict-svc")
         self.assertIn("local_only = true", mirror_file.read_text())
 
@@ -731,8 +862,10 @@ class ClaimProtocolTestCase(unittest.TestCase):
 
         git(clone, "checkout", "-q", "-b", "wt/mine")
         git(clone, "remote", "set-url", "origin", str(bogus_origin))
-        res = run_claims(clone, "claim", "still-offline-svc", "--intent", "stays offline")
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        res = run_claims(
+            clone, "claim", "still-offline-svc", "--intent", "stays offline", "--allow-offline"
+        )
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
         mirror_file = self._mirror_file(clone, "still-offline-svc")
         self.assertIn("local_only = true", mirror_file.read_text())
 
@@ -741,6 +874,74 @@ class ClaimProtocolTestCase(unittest.TestCase):
         self.assertIn("still-offline-svc", res_list.stdout)
         self.assertIn("LOCAL-ONLY", res_list.stdout)
         self.assertIn("local_only = true", mirror_file.read_text())
+
+    def test_two_line_intent_is_rejected_by_the_cli(self):
+        clone = self.clone
+        git(clone, "checkout", "-q", "-b", "wt/mine")
+        res = run_claims(clone, "claim", "svc", "--intent", 'first line\nsecond = "injected"')
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("control characters", res.stdout)
+        ls = git(clone, "ls-remote", "origin", "refs/claims/*")
+        self.assertEqual(ls.stdout.strip(), "")
+
+    def test_malformed_remote_record_does_not_brick_list_or_release(self):
+        clone = self.clone
+        git(clone, "checkout", "-q", "-b", "wt/mine")
+        # A pre-existing ref whose record is not parseable TOML, built with
+        # plumbing so the working tree and index are untouched.
+        env = dict(os.environ, GIT_INDEX_FILE=str(clone.parent / "tmp-index"))
+        blob = subprocess.run(
+            ["git", "-C", str(clone), "hash-object", "-w", "--stdin"],
+            input="= = [ not toml\n",
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        subprocess.run(["git", "-C", str(clone), "read-tree", "--empty"], env=env, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(clone),
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"100644,{blob},claims/broken.claim",
+            ],
+            env=env,
+            check=True,
+        )
+        tree = subprocess.run(
+            ["git", "-C", str(clone), "write-tree"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        commit = git(clone, "commit-tree", tree, "-m", "broken").stdout.strip()
+        git(clone, "push", "-q", "origin", f"{commit}:refs/claims/broken")
+
+        res = run_claims(clone, "claim", "good", "--intent", "alongside a broken record")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+        res_list = run_claims(clone, "list")
+        self.assertEqual(res_list.returncode, 0, res_list.stdout + res_list.stderr)
+        self.assertIn("warning", res_list.stdout)
+        self.assertIn("malformed", res_list.stdout)
+        self.assertIn("good", res_list.stdout)
+
+        res_rel = run_claims(clone, "release", "good")
+        self.assertEqual(res_rel.returncode, 0, res_rel.stdout + res_rel.stderr)
+        ls = git(clone, "ls-remote", "origin", "refs/claims/good")
+        self.assertEqual(ls.stdout.strip(), "")
+
+        # A bulk release still releases what it can and names the bad one.
+        run_claims(clone, "claim", "good2", "--intent", "bulk")
+        res_bulk = run_claims(clone, "release", "--branch", "wt/mine")
+        self.assertIn("released 1 claim(s)", res_bulk.stdout)
+        self.assertIn("broken", res_bulk.stdout)
+        self.assertNotEqual(res_bulk.returncode, 0)
+        git(clone, "push", "-q", "origin", ":refs/claims/broken")
 
     def test_custom_remote_and_ref_prefix(self):
         clone = self.clone

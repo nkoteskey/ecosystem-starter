@@ -212,6 +212,48 @@ class TestNonsubstantiveMarkerPath(GitRepoCase):
         self.assertTrue(ok, failures)
         self.assertEqual(checked, 1)
 
+    def test_rewriting_a_non_canonical_section_under_marker_fails(self):
+        # The reviewer's attack: an "Implementation Notes" section is not
+        # one of the canonical five, so an older check ignored it.
+        text = accepted_adr() + "\n## Implementation Notes\n\nOriginal notes.\n"
+        self.write("adr/0001-some-decision.md", text)
+        base = self.commit("base")
+
+        text = text.replace("Original notes.", "Rewritten to mean the opposite.")
+        self.write("adr/0001-some-decision.md", text)
+        head = self.commit("tidy notes [adr-nonsubstantive]")
+
+        ok, failures, checked = self.run_check(base, head)
+        self.assertFalse(ok)
+        self.assertTrue(any("Implementation Notes" in f for f in failures), failures)
+
+    def test_date_or_deciders_changed_under_marker_fails(self):
+        for old, new in (
+            ("- **Date:** 2026-01-01", "- **Date:** 2026-06-01"),
+            ("- **Deciders:** maintainers", "- **Deciders:** someone else"),
+        ):
+            self.write("adr/0001-some-decision.md", accepted_adr())
+            base = self.commit(f"base {old}")
+            text = (self.repo / "adr/0001-some-decision.md").read_text().replace(old, new)
+            self.write("adr/0001-some-decision.md", text)
+            head = self.commit("touch metadata [adr-nonsubstantive]")
+
+            ok, failures, checked = self.run_check(base, head)
+            self.assertFalse(ok, old)
+            self.assertTrue(any("metadata line(s) changed" in f for f in failures), failures)
+
+    def test_typo_inside_a_canonical_section_under_marker_fails(self):
+        self.write("adr/0001-some-decision.md", accepted_adr())
+        base = self.commit("base")
+        text = (self.repo / "adr/0001-some-decision.md").read_text()
+        text = text.replace("- driver one", "- driver one.")
+        self.write("adr/0001-some-decision.md", text)
+        head = self.commit("punctuation [adr-nonsubstantive]")
+
+        ok, failures, checked = self.run_check(base, head)
+        self.assertFalse(ok)
+        self.assertTrue(any("Decision Drivers" in f for f in failures), failures)
+
     def test_status_line_changed_under_marker_fails(self):
         self.write("adr/0001-some-decision.md", accepted_adr())
         base = self.commit("base")
@@ -223,7 +265,7 @@ class TestNonsubstantiveMarkerPath(GitRepoCase):
 
         ok, failures, checked = self.run_check(base, head)
         self.assertFalse(ok)
-        self.assertTrue(any("Status line changed" in f for f in failures))
+        self.assertTrue(any("metadata line(s) changed: Status" in f for f in failures), failures)
 
     def test_title_changed_under_marker_fails(self):
         self.write("adr/0001-some-decision.md", accepted_adr())
@@ -267,7 +309,9 @@ class TestNonsubstantiveMarkerPath(GitRepoCase):
 
         ok, failures, checked = self.run_check(base, head)
         self.assertFalse(ok)
-        self.assertTrue(any("Supersedes:" in f for f in failures))
+        self.assertTrue(
+            any("metadata line(s) changed: Supersedes" in f for f in failures), failures
+        )
 
     def test_marker_on_unrelated_commit_does_not_unlock_the_file(self):
         self.write("adr/0001-some-decision.md", accepted_adr())

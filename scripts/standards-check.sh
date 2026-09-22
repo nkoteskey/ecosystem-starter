@@ -28,6 +28,7 @@ SCRIPT_DIR="$ROOT/scripts"
 CONFIG_PY="$SCRIPT_DIR/mergegate_config.py"
 
 cfg() { python3 "$CONFIG_PY" get "$@"; }
+# cfg_list <key> — fills the global CFG_LIST array (bash 3.2 has no mapfile).
 cfg_list() {
   CFG_LIST=()
   local line
@@ -35,7 +36,17 @@ cfg_list() {
     if [ -n "$line" ]; then
       CFG_LIST+=("$line")
     fi
-  done < <("$@")
+  done < <(cfg "$@")
+}
+# cfg_keys <table> — fills CFG_LIST with the sub-table names of <table>.
+cfg_keys() {
+  CFG_LIST=()
+  local line
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then
+      CFG_LIST+=("$line")
+    fi
+  done < <(python3 "$CONFIG_PY" keys "$1")
 }
 
 if ! python3 "$CONFIG_PY" validate >/dev/null; then
@@ -55,13 +66,13 @@ scan() {
   local -a args=(--pattern "$pattern")
   local r g
   if [ "$scope" = "rust" ]; then
-    cfg_list cfg standards.rust_roots
+    cfg_list standards.rust_roots
     for r in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do args+=(--root "$r"); done
-    cfg_list cfg standards.rust_globs
+    cfg_list standards.rust_globs
     for g in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do args+=(--glob "$g"); done
   else
     args+=(--root "$(cfg standards.ts_root)")
-    cfg_list cfg standards.ts_globs
+    cfg_list standards.ts_globs
     for g in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do args+=(--glob "$g"); done
   fi
   local err_file rc
@@ -135,7 +146,7 @@ run_check() {
 
 echo "standards-check: scanning …"
 
-cfg_list python3 "$CONFIG_PY" keys standards.checks
+cfg_keys standards.checks
 for id in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do
   run_check "$id"
 done

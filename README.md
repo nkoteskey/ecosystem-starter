@@ -45,8 +45,12 @@ path from the start, costs a day. Retrofitting them costs a quarter.
 ## How to run it
 
 ```sh
-# after "Use this template" and cloning:
-./bootstrap.sh --name my-product --remote https://example.invalid/me/my-product.git --apps web,admin
+# after "Use this template" and cloning (in place; the shipped merge-gate.toml
+# is replaced only because --apps is given together with --force-config):
+./bootstrap.sh --name my-product --remote https://example.invalid/me/my-product.git \
+  --apps web,admin --force-config
+# or keep the shipped one-app config and edit it by hand:
+./bootstrap.sh --name my-product --remote https://example.invalid/me/my-product.git
 $EDITOR docs/NORTH_STAR.md CLAUDE.md          # fill in the method sections
 bash scripts/full-gate.sh --dry-run           # see what the gate would run
 bash scripts/wt.sh new first-change           # a worktree; installs the pre-push hook
@@ -74,8 +78,9 @@ repository's name.
   framework choice. `merge-gate.toml` assumes a Rust workspace with
   optional TypeScript frontends under `apps/<name>/`; change it if your
   layout differs.
-- It does not replace hosted branch protection. See the merge gate's
-  README for what the pre-push hook does and does not defend against.
+- It does not replace hosted branch protection. See
+  [docs/MERGE_GATE.md](docs/MERGE_GATE.md) for what the pre-push hook
+  does and does not defend against.
 
 ## How this repository is reviewed
 

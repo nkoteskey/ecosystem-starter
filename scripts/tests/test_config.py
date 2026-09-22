@@ -116,6 +116,17 @@ class TestDefaultsAndValidation(unittest.TestCase):
             {"gates": {"extra": {"x": {}}}},
             {"gates": {"fuzz": {"dir": "fuzz"}}},
             {"invariants": {"checks": {"x": {"pattern": "(", "paths": ["**/*.rs"]}}}},
+            {"claims": {"ref_prefix": "refs/heads/claims/"}},
+            {"claims": {"ref_prefix": "refs/tags/"}},
+            {"claims": {"ref_prefix": "refs/cla ims/"}},
+            {"repo": {"main_branch": "bad..name"}},
+            {"repo": {"train_prefix": "tr ain/"}},
+            {"repo": {"status_context": "two\nlines"}},
+            {"repo": {"status_context": ""}},
+            {"worktree": {"root": "../escape"}},
+            {"worktree": {"root": "relative/path"}},
+            {"claims": {"dir": "/abs"}},
+            {"invariants": {"allowlist": "/etc/hosts"}},
             {"standards": {"checks": {"x": {"tier": "maybe", "pattern": "a"}}}},
         ]
         for override in cases:

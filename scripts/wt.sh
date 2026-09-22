@@ -13,10 +13,12 @@
 # Commands:
 #   wt.sh new <name> [--from <ref>] [--bootstrap] [--no-hooks] [--shared-target]
 #   wt.sh rm <name> [--force] [--delete-branch]
-#   wt.sh ls
+#   wt.sh ls [--fetch]
 #   wt.sh bootstrap [<name>] [--shared-target]
 #
 # Stdlib bash only (must run on macOS's system bash 3.2 and on Linux).
+# Entries of worktree.bootstrap_copy are globs relative to the repo root;
+# they may contain spaces but not newlines.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,9 +63,10 @@ Commands:
       deleted if it is fully merged into $MAIN_REF (or force-deleted
       if --force is also given).
 
-  ls
+  ls [--fetch]
       List every worktree of this repo: path, branch, dirty file count,
-      ahead/behind $MAIN_REF, and any claims held by that branch.
+      ahead/behind $MAIN_REF (against the last-fetched $MAIN_REF unless
+      --fetch is given), and any claims held by that branch.
 
   bootstrap [<name>] [--shared-target]
       Run the --bootstrap step alone against an existing worktree (default:
@@ -162,9 +165,19 @@ do_bootstrap() {
   #    of worktree.bootstrap_copy is a glob relative to the repo root.
   cfg_list worktree.bootstrap_copy
   local pattern src rel dst
+  local -a matches
   for pattern in "${CFG_LIST[@]:+${CFG_LIST[@]}}"; do
-    # shellcheck disable=SC2231  # the glob expansion is the point here
-    for src in "$PRIMARY_ROOT"/$pattern; do
+    # Expand the glob with word-splitting limited to newlines, so a pattern
+    # (or a matched path) containing spaces stays one word.
+    matches=()
+    while IFS= read -r src; do
+      [ -n "$src" ] && matches+=("$src")
+    done < <(
+      IFS=$'\n'
+      # shellcheck disable=SC2231,SC2086  # the glob expansion is the point here
+      for src in "$PRIMARY_ROOT"/$pattern; do printf '%s\n' "$src"; done
+    )
+    for src in "${matches[@]:+${matches[@]}}"; do
       [ -e "$src" ] || continue
       rel="${src#"$PRIMARY_ROOT"/}"
       dst="$wt_path/$rel"
@@ -217,7 +230,15 @@ cmd_new() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --from)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then
+          echo "wt.sh new: --from needs a value (a ref such as $MAIN_REF)" >&2
+          usage >&2
+          exit 1
+        fi
         from_ref="$2"
+        case "$from_ref" in
+          -*) echo "wt.sh new: invalid --from value '$from_ref'" >&2; exit 1 ;;
+        esac
         shift 2
         ;;
       --bootstrap)
@@ -251,6 +272,11 @@ cmd_new() {
 
   echo "==> fetching $REMOTE"
   git -C "$PRIMARY_ROOT" fetch "$REMOTE"
+
+  if ! git -C "$PRIMARY_ROOT" rev-parse --verify -q "$from_ref^{commit}" >/dev/null 2>&1; then
+    echo "wt.sh new: --from '$from_ref' does not resolve to a commit" >&2
+    exit 1
+  fi
 
   if git -C "$PRIMARY_ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
     echo "==> branch '$branch' already exists locally — reusing it (not creating fresh from $from_ref)"
@@ -400,19 +426,41 @@ cmd_rm() {
 }
 
 cmd_ls() {
+  local do_fetch=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fetch) do_fetch=1; shift ;;
+      *) echo "wt.sh ls: unknown argument '$1'" >&2; exit 1 ;;
+    esac
+  done
+  if [ "$do_fetch" -eq 1 ]; then
+    git -C "$PRIMARY_ROOT" fetch "$REMOTE" "$MAIN" --quiet 2>/dev/null || true
+  fi
   printf "%-55s %-25s %-6s %-16s %s\n" "PATH" "BRANCH" "DIRTY" "AHEAD/BEHIND" "CLAIMS"
-  git -C "$PRIMARY_ROOT" worktree list --porcelain | awk '
-    /^worktree / { if (path != "") { print path"\t"branch }; path = $2; branch = "" }
-    /^branch /   { b = $2; sub("refs/heads/", "", b); branch = b }
-    END { if (path != "") print path"\t"branch }
-  ' | while IFS=$'\t' read -r path branch; do
+  # `worktree list --porcelain` prints "worktree <path>" / "branch <ref>"
+  # stanzas separated by blank lines; the path is everything after the
+  # first space, so paths with spaces survive.
+  local line path="" branch=""
+  emit() {
+    if [ -n "$path" ]; then
+      printf '%s\t%s\n' "$path" "$branch"
+    fi
+  }
+  git -C "$PRIMARY_ROOT" worktree list --porcelain | {
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*) emit; path="${line#worktree }"; branch="" ;;
+        "branch "*) branch="${line#branch }"; branch="${branch#refs/heads/}" ;;
+      esac
+    done
+    emit
+  } | while IFS=$'\t' read -r path branch; do
     [ -z "$path" ] && continue
     local dirty
     dirty="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 
     local ahead="?" behind="?"
     if [ -n "$branch" ]; then
-      git -C "$path" fetch "$REMOTE" "$MAIN" --quiet 2>/dev/null || true
       if counts="$(git -C "$path" rev-list --left-right --count "$MAIN_REF...$branch" 2>/dev/null)"; then
         behind="${counts%%[[:space:]]*}"
         ahead="${counts##*[[:space:]]}"

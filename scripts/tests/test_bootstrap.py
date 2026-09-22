@@ -177,9 +177,31 @@ class BootstrappedRepoCase(unittest.TestCase):
         res = sh(self.clone, "bash", "scripts/wt.sh", "new", "../escape", env=env)
         self.assertNotEqual(res.returncode, 0)
 
+        res = sh(self.clone, "bash", "scripts/wt.sh", "new", "feature-nofrom", "--from", env=env)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("--from needs a value", res.stderr)
+        res = sh(
+            self.clone,
+            "bash",
+            "scripts/wt.sh",
+            "new",
+            "feature-badfrom",
+            "--from",
+            "no-such-ref",
+            env=env,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("does not resolve", res.stderr)
+        self.assertFalse((self.wt_root / "feature-badfrom").exists())
+
+        # `ls` does not fetch by default (works with the remote gone).
+        git(self.clone, "remote", "set-url", "origin", str(self.wt_root / "nowhere.git"))
         res = sh(self.clone, "bash", "scripts/wt.sh", "ls", env=env)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("wt/feature-x", res.stdout)
+        git(self.clone, "remote", "set-url", "origin", str(self.origin))
+        res = sh(self.clone, "bash", "scripts/wt.sh", "ls", "--fetch", env=env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
         # Unpushed branch: refuse without --force.
         res = sh(self.clone, "bash", "scripts/wt.sh", "rm", "feature-x", env=env)
@@ -188,6 +210,24 @@ class BootstrappedRepoCase(unittest.TestCase):
         res = sh(self.clone, "bash", "scripts/wt.sh", "rm", "feature-x", "--force", env=env)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertFalse(wt.exists())
+
+    def test_hook_fails_closed_on_invalid_config(self):
+        env = {"MERGE_GATE_WT_ROOT": str(self.wt_root)}
+        res = sh(self.clone, "bash", "scripts/wt.sh", "new", "feature-cfg", env=env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        (self.clone / "merge-gate.toml").write_text("schema = 1\n[repo]\nremote = 'a b'\n")
+        git(self.clone, "commit", "-q", "-am", "break config")
+        res = sh(
+            self.clone,
+            "git",
+            "push",
+            "origin",
+            "HEAD:refs/heads/scratch",
+            env={"MERGE_GATE_TRAIN": "1"},
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("REFUSED", res.stderr)
+        self.assertIn("invalid", res.stderr)
 
     def test_hook_blocks_direct_main_push_after_install(self):
         env = {"MERGE_GATE_WT_ROOT": str(self.wt_root)}
