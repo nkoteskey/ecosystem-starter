@@ -26,9 +26,11 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -943,6 +945,36 @@ class ClaimProtocolTestCase(unittest.TestCase):
         self.assertNotEqual(res_bulk.returncode, 0)
         git(clone, "push", "-q", "origin", ":refs/claims/broken")
 
+    def test_hanging_remote_times_out_into_the_unreachable_path(self):
+        """A git that never answers (stubbed: `git push` and `git ls-remote`
+        sleep past claims.network_timeout_seconds) must be reported as a
+        network error and take the unreachable path — exit 1 without
+        --allow-offline, nothing recorded — instead of hanging."""
+        clone = self.clone
+        git(clone, "checkout", "-q", "-b", "wt/mine")
+        (clone / "merge-gate.toml").write_text(
+            'schema = 1\n[claims]\napp_crates = ["app-a"]\nnetwork_timeout_seconds = 1\n'
+        )
+        real_git = shutil.which("git")
+        stub_dir = clone.parent / "stub-bin"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "git"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$1" in push|ls-remote) sleep 5 ;; esac\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        stub.chmod(0o755)
+        env = {"PATH": f"{stub_dir}:{os.environ['PATH']}"}
+        started = time.monotonic()
+        res = run_claims(clone, "claim", "svc", "--intent", "hang test", env=env)
+        elapsed = time.monotonic() - started
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("timed out", res.stderr)
+        self.assertIn("--allow-offline", res.stderr)
+        self.assertLess(elapsed, 4.5, "the timeout must cut the hang short")
+        self.assertFalse(self._mirror_file(clone, "svc").exists())
+
     def test_custom_remote_and_ref_prefix(self):
         clone = self.clone
         git(clone, "remote", "rename", "origin", "upstream")
@@ -973,6 +1005,8 @@ class PrePushHookTests(unittest.TestCase):
         git(self.clone, "config", "core.hooksPath", str(HOOKS_DIR))
         git(self.clone, "checkout", "-q", "-b", "main")
         commit_file(self.clone, "README.md", "hi\n", "init")
+        # The hook fails closed without a config file; give it one.
+        commit_file(self.clone, "merge-gate.toml", "schema = 1\n", "config")
 
     def tearDown(self):
         self._tmp.cleanup()

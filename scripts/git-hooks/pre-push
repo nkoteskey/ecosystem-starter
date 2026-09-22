@@ -24,8 +24,8 @@ if [ ! -f "$CONFIG_PY" ]; then
   echo "pre-push: REFUSED — $CONFIG_PY is missing; the merge-gate scripts are not installed correctly." >&2
   exit 1
 fi
-if ! python3 "$CONFIG_PY" validate >/dev/null; then
-  echo "pre-push: REFUSED — merge-gate.toml is missing or invalid (run: python3 scripts/mergegate_config.py validate)." >&2
+if ! python3 "$CONFIG_PY" validate --require-file >/dev/null; then
+  echo "pre-push: REFUSED — merge-gate.toml is missing or invalid (run: python3 scripts/mergegate_config.py validate --require-file)." >&2
   exit 1
 fi
 MAIN_BRANCH="$(python3 "$CONFIG_PY" get repo.main_branch)"

@@ -54,10 +54,15 @@ If a decision changes:
 3. In the old record, change only its Status line to `Superseded by
    ADR-MMMM`. This is the one permitted edit to an accepted record.
 
-Typo and broken-link fixes that leave the five canonical sections, the
-title, the Status line and the heading set byte-identical are allowed with
-`[adr-nonsubstantive]` in the commit message of the commit that touches
-the file. `scripts/adr-check.py` enforces all of this mechanically.
+Link and typo fixes are allowed with `[adr-nonsubstantive]` in the message
+of the commit that touches the file, under one enforced rule: every `## `
+section body and every `- **Key:**` metadata line (Status, Acceptance,
+Date, Deciders, Supersedes, Sources, …) must stay byte-identical, and the
+title and the set of headings unchanged. Only text outside every section
+and outside the metadata lines — the derivation blockquote, prose between
+the header and the first section — may change. A typo inside a section is
+fixed by a superseding record. `scripts/adr-check.py` enforces all of
+this mechanically.
 
 ## Recording a retrospective decision
 

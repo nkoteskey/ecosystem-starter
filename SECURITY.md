@@ -4,9 +4,9 @@
 
 Do not open a public issue for a security problem.
 
-Report it privately to: **<security contact — the owner fills this in
-before publishing: an email address or the hosting site's private
-vulnerability-reporting form>**.
+Report it privately to: **`<security contact — fill before publishing>`**
+(an email address or the hosting site's private vulnerability-reporting
+form). This placeholder is checked by `PUBLISH_CHECKLIST.md`.
 
 Include what you found, how to reproduce it, and the version or commit.
 You will get an acknowledgement within a few days and a fix or a reasoned

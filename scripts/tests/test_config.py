@@ -127,6 +127,8 @@ class TestDefaultsAndValidation(unittest.TestCase):
             {"worktree": {"root": "relative/path"}},
             {"claims": {"dir": "/abs"}},
             {"invariants": {"allowlist": "/etc/hosts"}},
+            {"adr": {"section_headings": ["## Context"]}},
+            {"claims": {"network_timeout_seconds": 0}},
             {"standards": {"checks": {"x": {"tier": "maybe", "pattern": "a"}}}},
         ]
         for override in cases:
@@ -181,6 +183,14 @@ class TestCli(unittest.TestCase):
 
         res = self.run_cli("validate")
         self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_require_file_fails_when_absent_but_defaults_otherwise(self):
+        (self.repo / "merge-gate.toml").unlink()
+        res = self.run_cli("validate")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        res = self.run_cli("validate", "--require-file")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("not found", res.stderr)
 
     def test_invalid_file_fails_validate(self):
         (self.repo / "merge-gate.toml").write_text("schema = 1\n[repo]\nremote = 'a b'\n")

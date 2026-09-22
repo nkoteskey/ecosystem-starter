@@ -31,7 +31,7 @@ CLI (used by the shell scripts):
 
     mergegate_config.py get <dotted.key> [--default <value>]
     mergegate_config.py keys <dotted.table>
-    mergegate_config.py validate
+    mergegate_config.py validate [--require-file]
     mergegate_config.py dump
 
 `get` prints a scalar on one line, or an array one element per line, and
@@ -76,6 +76,7 @@ DEFAULTS: Dict[str, Any] = {
         "app_crates": [],
         "min_consumers": 2,
         "default_ttl_hours": 8,
+        "network_timeout_seconds": 30,
         "exempt_actors": ["dependabot[bot]"],
         "docs_prefixes": ["docs/"],
         "docs_suffixes": [".md"],
@@ -98,13 +99,6 @@ DEFAULTS: Dict[str, Any] = {
         "dir": "adr",
         "ignored_basenames": ["OPEN-QUESTIONS.md", "README.md", "TEMPLATE.md", "0000-template.md"],
         "nonsubstantive_marker": "[adr-nonsubstantive]",
-        "section_headings": [
-            "## Context",
-            "## Decision Drivers",
-            "## Considered Options",
-            "## Decision",
-            "## Consequences",
-        ],
     },
     "baseline": {
         "retry_suite_prefix": "cargo:",
@@ -424,12 +418,24 @@ def config_from_dict(file_cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def load_config(root: Optional[Path] = None) -> Dict[str, Any]:
-    """Defaults merged with `<root>/merge-gate.toml` (if present), validated."""
+class MissingConfig(ConfigError):
+    """`merge-gate.toml` is absent and the caller required it to exist."""
+
+
+def load_config(root: Optional[Path] = None, require_file: bool = False) -> Dict[str, Any]:
+    """Defaults merged with `<root>/merge-gate.toml` (if present), validated.
+
+    Without the file, the defaults alone are returned — that is what the
+    tools rely on in a repository that has not been configured yet, and
+    what `bootstrap.sh` relies on before it writes the file. Callers that
+    must not guess (the pre-push hook) pass `require_file=True` and get
+    `MissingConfig` instead."""
     if root is None:
         root = repo_root()
     path = Path(root) / CONFIG_FILENAME
     file_cfg: Dict[str, Any] = {}
+    if require_file and not path.exists():
+        raise MissingConfig(f"{path}: not found")
     if path.exists():
         try:
             file_cfg = parse_toml_subset(path.read_text())
@@ -566,6 +572,12 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
         isinstance(cl["default_ttl_hours"], (int, float)) and cl["default_ttl_hours"] > 0,
         "claims.default_ttl_hours must be a positive number",
     )
+    _expect(
+        p,
+        isinstance(cl["network_timeout_seconds"], (int, float))
+        and cl["network_timeout_seconds"] > 0,
+        "claims.network_timeout_seconds must be a positive number",
+    )
 
     af = cfg["affected"]
     _expect(p, _is_str_list(af["frontend_apps"]), "affected.frontend_apps must be a string array")
@@ -581,8 +593,8 @@ def validate(cfg: Dict[str, Any]) -> List[str]:
     _expect(p, bool(_REL_PATH_RE.match(str(adr["dir"]))), "adr.dir must be a relative path")
     _expect(
         p,
-        _is_str_list(adr["section_headings"]) and len(adr["section_headings"]) > 0,
-        "adr.section_headings must be a non-empty string array",
+        "section_headings" not in adr,
+        "adr.section_headings was removed: every section body is compared; delete the key",
     )
 
     gates = cfg["gates"]
@@ -701,12 +713,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_keys = sub.add_parser("keys", help="print the sub-table names of a table")
     p_keys.add_argument("table")
 
-    sub.add_parser("validate", help="exit 0 if merge-gate.toml is usable")
+    p_validate = sub.add_parser("validate", help="exit 0 if merge-gate.toml is usable")
+    p_validate.add_argument(
+        "--require-file",
+        action="store_true",
+        help="also fail when merge-gate.toml is absent (the pre-push hook uses this; "
+        "without it an absent file means 'defaults')",
+    )
     sub.add_parser("dump", help="print the merged config as JSON")
 
     args = ap.parse_args(argv)
     try:
-        cfg = load_config()
+        cfg = load_config(require_file=bool(getattr(args, "require_file", False)))
     except ConfigError as e:
         print(f"merge-gate.toml: {e}", file=sys.stderr)
         return 1

@@ -96,7 +96,9 @@ PYEOF
 # Space-separated service ids from `claims.py list --json` whose `branch`
 # field equals $1 — the post-land assertion below uses this to verify a
 # `release --branch` actually cleared every claim it should have. Read-only;
-# safe to call in --dry-run.
+# safe to call in --dry-run. Main is already pushed when this runs, so a
+# failure here (remote gone, malformed record) must never abort the
+# cleanup — callers append `|| true` and act on an empty result.
 claims_held_by() {
   local branch="$1"
   python3 "$SCRIPT_DIR/claims.py" list --json | python3 -c '
@@ -530,11 +532,11 @@ for branch in "${LANDED[@]}"; do
   # release. If it did, retry once more, then report loudly — never fail
   # the train over it, since main already moved.
   if [ "$DRY_RUN" -ne 1 ]; then
-    leftover="$(claims_held_by "$branch")"
+    leftover="$(claims_held_by "$branch")" || true
     if [ -n "$leftover" ]; then
       warn "post-land assertion: '$branch' still holds claim(s) after release — retrying once: $leftover"
       python3 "$SCRIPT_DIR/claims.py" release --branch "$branch" || true
-      leftover="$(claims_held_by "$branch")"
+      leftover="$(claims_held_by "$branch")" || true
       if [ -n "$leftover" ]; then
         warn_red "LEFTOVER CLAIMS after retry — '$branch' still holds: $leftover (train already landed; release by hand: python3 scripts/claims.py release --branch $branch)"
       else

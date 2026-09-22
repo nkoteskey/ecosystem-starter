@@ -61,9 +61,6 @@ class Rules:
         self.dir: str = adr_cfg["dir"].strip("/")
         self.numbered_re = re.compile(rf"^{re.escape(self.dir)}/(\d{{4}})-.*\.md$")
         self.ignored_basenames = set(adr_cfg["ignored_basenames"])
-        # Kept for configuration compatibility and reporting; the marker path
-        # compares EVERY section body, not only these.
-        self.section_headings: List[str] = list(adr_cfg["section_headings"])
         self.marker: str = adr_cfg["nonsubstantive_marker"]
 
 

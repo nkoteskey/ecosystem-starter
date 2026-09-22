@@ -62,7 +62,7 @@ Or into an existing repository:
 /path/to/ecosystem-starter/bootstrap.sh /path/to/repo --apps web
 ```
 
-Requirements: bash 3.2+, git, python3 (3.8+). `cargo` and `npm` only for
+Requirements: bash 3.2+, git 2.31+, python3 (3.9+). `cargo` and `npm` only for
 the gates that use them.
 
 To make this repository a template on the hosting site, enable the

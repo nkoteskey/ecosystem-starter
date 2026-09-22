@@ -211,6 +211,24 @@ class BootstrappedRepoCase(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertFalse(wt.exists())
 
+    def test_hook_fails_closed_on_missing_config(self):
+        env = {"MERGE_GATE_WT_ROOT": str(self.wt_root)}
+        res = sh(self.clone, "bash", "scripts/wt.sh", "new", "feature-nocfg", env=env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        git(self.clone, "rm", "-q", "merge-gate.toml")
+        git(self.clone, "commit", "-q", "-m", "drop config")
+        res = sh(
+            self.clone,
+            "git",
+            "push",
+            "origin",
+            "HEAD:refs/heads/scratch",
+            env={"MERGE_GATE_TRAIN": "1"},
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("REFUSED", res.stderr)
+        self.assertIn("missing", res.stderr)
+
     def test_hook_fails_closed_on_invalid_config(self):
         env = {"MERGE_GATE_WT_ROOT": str(self.wt_root)}
         res = sh(self.clone, "bash", "scripts/wt.sh", "new", "feature-cfg", env=env)

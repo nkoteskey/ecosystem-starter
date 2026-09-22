@@ -32,13 +32,17 @@ jobs:
 
   gate-selftest:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: configure git identity for the fixture repositories
         run: |
           git config --global user.email "ci"
@@ -46,6 +50,10 @@ jobs:
           git config --global init.defaultBranch main
       - name: gate scripts self-test
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: template bootstrap tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: claims registry is up to date
+        run: python3 scripts/claims.py sync-registry --check
       - name: validate the shipped merge-gate.toml
         run: python3 scripts/mergegate_config.py validate
       - name: full gate dry run

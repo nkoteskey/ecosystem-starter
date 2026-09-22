@@ -430,7 +430,6 @@ class TestConfigurableDir(GitRepoCase):
                 "dir": "docs/decisions",
                 "ignored_basenames": ["README.md"],
                 "nonsubstantive_marker": "[decision-nonsubstantive]",
-                "section_headings": ["## Context", "## Decision", "## Consequences"],
             }
         )
         self.write("docs/decisions/0001-some-decision.md", accepted_adr())

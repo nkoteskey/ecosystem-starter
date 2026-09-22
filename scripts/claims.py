@@ -122,6 +122,10 @@ EXEMPT_ACTORS: List[str] = list(CFG["claims"]["exempt_actors"])
 DOCS_PREFIXES: List[str] = list(CFG["claims"]["docs_prefixes"])
 DOCS_SUFFIXES: List[str] = list(CFG["claims"]["docs_suffixes"])
 LOCKFILE_NAMES: List[str] = list(CFG["claims"]["lockfile_names"])
+# Every git invocation (including the reachability probe) is bounded; a
+# hang is reported as a network error ("timed out") and takes the same
+# unreachable path as a refused connection.
+NETWORK_TIMEOUT: float = float(CFG["claims"]["network_timeout_seconds"])
 
 parse_toml_lite = mergegate_config.parse_toml_subset
 
@@ -199,14 +203,24 @@ def glob_matches(glob: str, path: str) -> bool:
 
 
 def run(cmd: List[str], cwd: Optional[Path] = None, input_text: Optional[str] = None, env=None):
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd or ROOT),
-        input=input_text,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=str(cwd or ROOT),
+            input=input_text,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=NETWORK_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            "",
+            f"claims.py: '{' '.join(cmd[:2])}' timed out after {NETWORK_TIMEOUT:g}s "
+            f"(claims.network_timeout_seconds)",
+        )
 
 
 def current_branch() -> str:
