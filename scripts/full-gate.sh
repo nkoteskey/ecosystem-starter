@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317  # gate_* functions are invoked indirectly via run_gate "<name>" <fn>
 #
 # full-gate.sh — the ONE full-gate definition (docs/DESIGN.md §5.2), used by
 # both a hosted full lane and the local `scripts/land.sh` train. Every gate
