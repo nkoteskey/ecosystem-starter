@@ -4,7 +4,7 @@
 
 Do not open a public issue for a security problem.
 
-Report it privately to: **`<security contact — fill before publishing>`**
+Report it privately to: GitHub's private vulnerability reporting on this repository (Security tab → "Report a vulnerability"). Do not open a public issue for a security problem.
 (an email address or the hosting site's private vulnerability-reporting
 form). This placeholder is checked by `PUBLISH_CHECKLIST.md`.
 
